@@ -1,0 +1,26 @@
+NODE_ENV=development
+PORT=5812
+APP_URL=http://localhost:3555
+APP_PUBLIC_URL=http://localhost:3555
+SITE_URL=http://localhost:3555
+
+DB_HOST=127.0.0.1
+DB_PORT=3300
+DB_USER=replace-with-local-db-user
+DB_PASSWORD=replace-with-local-db-password
+DB_NAME=APA 2 - Staff Report
+
+JWT_SECRET=replace-with-a-generated-secret
+PASSWORD_ENCRYPTION_KEY=replace-with-base64-32-byte-key
+JWT_EXPIRES_IN=1h
+COOKIE_SECURE=false
+COOKIE_SAMESITE=lax
+CORS_ORIGIN=http://localhost:3555
+
+AWS_REGION=ap-southeast-1
+AWS_S3_BUCKET=image-apa-app2
+AWS_S3_PREFIX=reportupload
+
+# Optional. Keep AI keys in backend configuration only.
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3.6-flash

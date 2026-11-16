@@ -1,54 +1,132 @@
-# APA 2 - Staff Report
+# XS Staff Report
 
-Staff weekly/monthly report (T&R + TRS), performance evaluation, notices, and Telegram integration.
+XS Staff Report is a staff reporting and task management application. It provides weekly T&R reports, TRS task workflows, deliverable proof uploads, manager review, notices, performance evaluation, and Telegram notifications.
 
-**Stack:** React 19 + Vite + Tailwind · Express + MySQL · Gemini AI · AWS S3 · PM2
+## Repository branches
 
-## Project structure
+- `app1` and `app2` currently point to the same application version.
+- `main` contains this repository guide. The application source is on `app1` and `app2`.
+- Use `app2` for active development. Keep `app1` synchronized when publishing a shared release.
 
-- `backend/`: Express API, authentication, permissions, domain services, SQL schema/migrations, and deployment configuration.
-- `frontend/`: React app, API client, and Express host that serves the SPA and proxies API/file requests.
-- `docs/flowchart.md`: request flow, login/session lifecycle, report workflow, deadline worker, and deployment diagram.
+Clone the application branch:
 
-The frontend runs on port 3555 and proxies to the backend on port 5812. The app uses the existing `APA 2 - Staff Report` database. Local backend settings are in the ignored `backend/.env2.local`; production settings are provided in the server's `.env` or secrets manager. Never commit credentials.
+```powershell
+git clone --branch app2 --single-branch https://github.com/duffii2026/XS---Staff-Report.git
+cd XS---Staff-Report
+```
 
-## API overview
+## Architecture
 
-All endpoints are mounted from `backend/routes/index.js`.
+```text
+Browser (React + Vite) :3555
+        │ /api and file requests
+        ▼
+Express API :5812 ── MySQL database
+        ├──────────── AWS S3 (uploaded proof and signatures)
+        └──────────── Gemini API (optional AI features)
+```
 
-| Route | Purpose | Auth |
-|---|---|---|
-| `GET /health` | Health check | public |
-| `/auth/*` | Login, sessions, refresh, logout | route-specific |
-| `/reports/*` | Weekly reports, drafts, submission, review, disputes | permission |
-| `/trs/*` | TRS task assignment, status, score, comments | permission |
-| `/appraisals/*` | Performance evaluation | permission |
-| `/users/*`, `/templates/*` | Users, roles, permissions, templates | permission |
-| `/notices/*`, `/notifications/*` | Announcements and alerts | route-specific |
-| `/telegram/*` | Bot configuration, triggers, tests | permission |
-| `/signatures/*`, `/files/*` | Signatures and S3 files | route-specific |
-| `/audit/*`, `/api-keys/*`, `/dashboard/*`, `/org-config/*` | Logs, keys, statistics, organization settings | permission |
-| `/ai/*` | AI summaries and checklist suggestions | authenticated |
+- `frontend/` contains the React application and the Express web host/proxy.
+- `backend/` contains the API, authentication, permissions, report and task services, and scheduled notifications.
+- `backend/sql/` contains the schema and versioned migrations.
+- `docs/flowchart.md` describes the main request and reporting flows.
 
-Authentication uses httpOnly access and refresh cookies, server API keys, and granular permission checks. Responses use `{ success, status, message?, data }`.
+## Requirements
 
-## Local development
+- Node.js and npm.
+- A reachable MySQL database with the Staff Report schema.
+- AWS S3 access for file uploads. Gemini credentials are needed only for AI features.
 
-Start the backend from `backend/` with `npm run dev` (port 5812), then start the frontend from `frontend/` with `npm run dev` (port 3555). The frontend is available at http://localhost:3555.
+## Local setup
 
-Useful commands: frontend `npm run lint`, `npm run build`, `npm start`; backend `npm run check`. Database migrations and seed scripts are manual operations; do not run them as part of ordinary startup.
+From the repository root, install dependencies and create private local configuration files from the checked-in examples:
 
-## Configuration and data
+```powershell
+cd backend
+npm ci
+Copy-Item .env2.local.example .env2.local
+```
 
-The local backend profile uses the existing APA 2 database, its existing port, and the App2 S3 bucket. Keep `.env2.local`, `.env2.secrets`, cloud credential files, and production `.env` files private. The schema and migration files target the configured database; review and back up data before any manual migration.
+In another terminal, from the repository root:
+
+```powershell
+cd frontend
+npm ci
+Copy-Item .env2.example .env2
+```
+
+Edit both private files before starting the application. Set the database host, port, database name, user, and password in `backend/.env2.local`. Keep `API_HOST=localhost:5812` in `frontend/.env2` for local development. Set `CORS_ORIGIN=http://localhost:3555` in the backend configuration.
+
+The backend requires a strong `JWT_SECRET` and a valid `PASSWORD_ENCRYPTION_KEY` (Base64 encoded 32 random bytes). Generate values locally with Node.js; do not paste them into source files or commit them:
+
+```powershell
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
+Set the first value as `JWT_SECRET` and the second as `PASSWORD_ENCRYPTION_KEY`. Store `GEMINI_API_KEY` only in the backend's private environment file or a secrets manager. Do not put API keys in frontend configuration.
+
+Start the backend and frontend in separate terminals:
+
+```powershell
+# Terminal 1
+cd backend
+npm run dev
+```
+
+```powershell
+# Terminal 2
+cd frontend
+npm run dev
+```
+
+Open [http://localhost:3555](http://localhost:3555). The API health endpoint is [http://localhost:5812/api/health](http://localhost:5812/api/health).
+
+## Build and checks
+
+```powershell
+cd backend
+npm run check
+npm run build
+```
+
+```powershell
+cd frontend
+npm run lint
+npm run build
+```
+
+The frontend production bundle is served by its Express host on port `3555`; the backend API listens on port `5812`. PM2 configuration is in each service's `ecosystem.config.cjs`.
+
+## Database and files
+
+The application uses MySQL and AWS S3. Review the configured database and take an approved backup before applying any migration. Migrations are manual; normal startup does not apply them. Do not run the seed script against a database containing real user data.
+
+For local file uploads, configure the App2 S3 bucket and AWS credentials through a local profile, environment variables, or an instance role. Never commit AWS credentials or private keys.
+
+## Production release
+
+Deploy only an approved build. Back up the current application files before replacing a release. Database backups are required before any database migration. Restart the Staff Report frontend and API services only, then verify:
+
+- The Staff Report website loads over HTTPS.
+- The API health endpoint responds successfully at `/api/health`.
+- Staff Report login and key reporting workflows work.
+- Existing database and uploaded files remain available.
+
+Keep production environment variables in the server's private configuration or secrets manager. Never copy local `.env` files or credentials to GitHub.
 
 ## Troubleshooting
 
-- Frontend API errors: confirm the backend is listening on port 5812 and frontend proxy settings target it.
-- Login/CORS errors: verify the local frontend origin (`http://localhost:3555`) is in `CORS_ORIGIN`.
-- Database connection errors: check MySQL availability and the ignored local configuration without printing credentials.
-- File access errors: check App2 S3 bucket and cloud role/credentials.
-- AI errors: verify the backend AI key in a private secrets file or secrets manager.
-- Empty page: inspect the browser network tab for failed `/api` requests.
+- **Frontend reports API unreachable:** confirm the API is listening on port `5812` and `API_HOST` points to `localhost:5812` locally.
+- **Login or CORS errors:** check `CORS_ORIGIN`, `APP_URL`, and `COOKIE_SECURE` against the URL used to access the site.
+- **Database connection errors:** check MySQL availability and private `DB_*` values; do not print passwords in logs or support messages.
+- **Proof or signature upload errors:** check S3 bucket, region, IAM permissions, and the backend file logs.
+- **AI features unavailable:** check `GEMINI_API_KEY` in the backend private configuration.
+- **Telegram notifications fail:** check the bot configuration, recipient chat setup, and outbound server connectivity.
 
-See `backend/sql/schema.sql` and `backend/sql/migrate_v*.sql` for database structure. Never run seed scripts against a database containing real user data.
+## Security
+
+- Never commit `.env` files, API keys, database passwords, Telegram bot tokens, AWS credentials, or SSH private keys.
+- Use unique, strong production secrets; rotate any credential that was exposed.
+- Keep application roles and permissions managed through the Staff Report administration workflows.
+- Do not apply SQL migrations or seed data to production without an approved backup and rollback plan.
