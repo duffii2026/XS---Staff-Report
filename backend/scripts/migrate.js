@@ -10,7 +10,7 @@ import { env } from '../config/env.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function main() {
-  console.log('Migrating apastaffreport (v2 features) ...');
+  console.log(`Migrating ${env.DB_NAME} (v2 features) ...`);
 
   const conn = await mysql.createConnection({
     host: env.DB_HOST,
@@ -31,8 +31,7 @@ async function main() {
   await conn.query(schema);
   console.log('New tables ensured.');
 
-  // v3 tables (no USE statement — re-select the target DB first so the app2
-  // instance isn't affected by migrate_v2.sql's hardcoded USE)
+  // Re-select the configured database before each migration file.
   await conn.query('USE ??', [env.DB_NAME]);
   const schemaV3Path = path.resolve(__dirname, '../sql/migrate_v3.sql');
   const schemaV3 = fs.readFileSync(schemaV3Path, 'utf8');
@@ -60,6 +59,20 @@ async function main() {
        MODIFY name VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL`
   );
   console.log('v5 tables ensured.');
+
+  // v7 tables (Weekly Summary Form — own table, never columns on `reports`)
+  await conn.query('USE ??', [env.DB_NAME]);
+  const schemaV7Path = path.resolve(__dirname, '../sql/migrate_v7.sql');
+  const schemaV7 = fs.readFileSync(schemaV7Path, 'utf8');
+  await conn.query(schemaV7);
+  console.log('v7 tables ensured (tr_weekly_summaries).');
+
+  // v8 tables (saved AI team summaries — chat-style history, no report columns)
+  await conn.query('USE ??', [env.DB_NAME]);
+  const schemaV8Path = path.resolve(__dirname, '../sql/migrate_v8.sql');
+  const schemaV8 = fs.readFileSync(schemaV8Path, 'utf8');
+  await conn.query(schemaV8);
+  console.log('v8 tables ensured (tr_team_summaries).');
 
   // ---------------------------------------------------------------
   // 2) New columns (information_schema guard for idempotency)
@@ -142,7 +155,7 @@ async function main() {
     const notices = [
       {
         code: 'notice_welcome',
-        title: 'Welcome to the APA Staff Report Platform',
+        title: 'Welcome to the APA Staff Report 1 Platform',
         content:
           'This unified portal centralizes weekly T&R reporting, TRS task delegation, performance evaluation, and governance notices. Complete the Quick-Start onboarding checklist to get fully set up.',
         priority: 'standard',

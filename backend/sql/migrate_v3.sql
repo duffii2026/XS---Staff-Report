@@ -2,7 +2,7 @@
 -- APA Staff Report — v3 Feature Migration (new tables)
 -- Forced password change on first login.
 -- NOTE: no USE statement here — migrate.js already selects the
--- active database (supports both apastaffreport & apastaffreport2222).
+-- configured APA 2 database.
 -- Applied idempotently by scripts/migrate.js
 -- ============================================================
 

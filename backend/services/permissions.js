@@ -35,7 +35,9 @@ export const ROLE_DEFAULT_PERMISSIONS = {
     approveAppraisals: true,
     manageUsers: true,
     manageTemplates: true,
-    viewAuditLogs: true
+    // Audit trail is admin-only — activity from EVERY role is recorded,
+    // but only the System Administrator may read it.
+    viewAuditLogs: false
   },
   hr: {
     submitTRReport: true,
@@ -44,7 +46,7 @@ export const ROLE_DEFAULT_PERMISSIONS = {
     approveAppraisals: true,
     manageUsers: true,
     manageTemplates: true,
-    viewAuditLogs: true
+    viewAuditLogs: false
   },
   manager: {
     submitTRReport: true,

@@ -259,14 +259,12 @@ export const TRSTrackingTable: React.FC<TRSTrackingTableProps> = ({
   // superior, the assignee's superior, or exec/admin/hr may delete it — the
   // assignee never can. Approved & Completed is final, so it is not deletable.
   const canDeleteTask = (t: TRSTask): boolean => {
-    if (t.evaluationStatus === 'Approved') return false;
+    if (['admin', 'executive', 'hr'].includes(currentUser.role)) return true;
     const isSelfAssigned = t.assignedBy === t.assignedTo && t.assignedTo === currentUser.id;
     const isAssigneeButNotSelfAssigned = t.assignedTo === currentUser.id && !isSelfAssigned;
     if (isAssigneeButNotSelfAssigned) return false;
     if (isSelfAssigned) return true;
-    return (['admin', 'executive', 'hr'].includes(currentUser.role) ||
-      t.assignedBy === currentUser.id ||
-      getSubordinateUserIds(currentUser.id).has(t.assignedTo));
+    return t.assignedBy === currentUser.id || getSubordinateUserIds(currentUser.id).has(t.assignedTo);
   };
 
   // Tasks among selected that the current user has authority to delete

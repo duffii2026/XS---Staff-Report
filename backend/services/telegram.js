@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 
 let _cachedConfig = null;
 let _configAt = 0;
+const _alertedUnlinked = new Set();
 
 export async function getTelegramConfig(force = false) {
   if (!force && _cachedConfig && Date.now() - _configAt < 5000) return _cachedConfig;
@@ -149,6 +150,35 @@ export async function sendToUser(config, user, text, opts = {}) {
 }
 
 /**
+ * Check whether the bot can actually reach a chat (group / channel / DM) via
+ * /getChat. Telegram reports "Bad Request: chat not found" when the id is
+ * wrong or the bot was never added to the group, so validating up-front lets
+ * the admin get an actionable message instead of a raw API error.
+ */
+export async function checkTelegramChat(token, chatId) {
+  if (!token) return { ok: false, detail: 'No bot token stored yet.' };
+  if (!chatId) return { ok: false, detail: 'No chat id supplied.' };
+  try {
+    const json = await telegramFetch(token, `/getChat?chat_id=${encodeURIComponent(String(chatId))}`, { timeoutMs: 10000 });
+    if (!json.ok || !json.result) {
+      return { ok: false, detail: json.description || 'Telegram rejected the chat id.' };
+    }
+    const c = json.result;
+    return {
+      ok: true,
+      chat: {
+        id: c.id,
+        type: c.type || 'unknown',
+        title: c.title || c.username || c.first_name || `Chat ${c.id}`,
+        username: c.username || null
+      }
+    };
+  } catch (err) {
+    return { ok: false, detail: err.message };
+  }
+}
+
+/**
  * Process one Telegram update from the 1-click connect handshake.
  * When the user presses Start on t.me/<bot>?start=apa_<code>, the bot
  * receives "/start apa_<code>" with the sender's chat id + username.
@@ -200,7 +230,7 @@ async function handleTelegramUpdate(config, update) {
   );
 
   const welcome = `🎉 <b>APA TELEGRAM CONNECTED!</b>\n\nHello <b>${tok.user_code}</b>,\nYour account is now linked with the APA Staff Portal. You will receive task alerts, report updates, and deadline reminders here.`;
-  await sendTelegram(config, String(chatId), welcome, { buttonText: '🚀 Open APA Staff Portal' }).catch(() => {});
+  await sendTelegram(config, String(chatId), welcome, { buttonText: '🚀 Open APA 1 Staff Portal' }).catch(() => {});
 }
 
 /**
@@ -246,4 +276,266 @@ export async function saveTelegramConfig(patch) {
   if (!sets.length) return;
   await query(`UPDATE telegram_config SET ${sets.join(', ')} WHERE id = 1`, args);
   bustTelegramConfig();
+}
+
+let _pollingInterval = null;
+
+export async function processTelegramMessages(token) {
+  const cfg = await getTelegramConfig(true);
+  if (!cfg?.is_enabled || !cfg?.bot_token || !cfg?.main_group_chat_id) {
+    return { processed: 0, reason: 'Not configured' };
+  }
+
+  const offset = Number(cfg?.update_offset || 0);
+  const path = `/getUpdates?limit=100&timeout=0&offset=${offset}&allowed_updates=${encodeURIComponent('["message","channel_post"]')}`;
+  const j = await telegramFetch(token, path, { timeoutMs: 10000 });
+  if (!j.ok) return { processed: 0, reason: 'Telegram error' };
+
+  const updates = Array.isArray(j.result) ? j.result : [];
+
+  let maxId = offset;
+  let processed = 0;
+
+  const { parseChatMessageWithAI } = await import('./aiParser.js');
+  const { makeCode } = await import('./audit.js');
+  const { query, getOne } = await import('../config/db.js');
+  const { notifyUser } = await import('./audit.js');
+  const { dispatchFlow } = await import('./notificationFlow.js');
+  const { logActivity } = await import('./audit.js');
+  const { sendTelegram } = await import('./telegram.js');
+
+  for (const u of updates) {
+    const id = Number(u?.update_id);
+    if (id > maxId) maxId = id;
+
+    try {
+      const message = u?.message || u?.channel_post;
+      if (!message?.text) continue;
+
+      const chatId = String(message.chat?.id);
+      const text = message.text.trim();
+
+      if (cfg?.main_group_chat_id && chatId !== String(cfg.main_group_chat_id)) {
+        continue;
+      }
+
+      const mentionMatch = text.match(/^@(\w+)\s+(.+)$/);
+      if (!mentionMatch) continue;
+
+      const mentionedUsername = mentionMatch[1].toLowerCase();
+
+      // Check if message is older than 20 seconds first
+      const messageDate = message.date ? new Date(message.date * 1000) : new Date();
+      const now = new Date();
+      const secondsDiff = (now - messageDate) / 1000;
+      if (secondsDiff > 30) {
+        continue;
+      }
+
+      const msgId = String(message.message_id);
+
+      // Get sender (who sent the message)
+      const senderTelegramUsername = (message.from?.username || '').toLowerCase();
+      let assignedByCode = 'system';
+      let assignedByName = 'Telegram Bot';
+      
+      if (senderTelegramUsername) {
+        const sender = await getOne(
+          `SELECT * FROM users WHERE is_active = 1 AND (LOWER(telegram_username) = ? OR LOWER(telegram_username) = ?)` ,
+          [`@${senderTelegramUsername}`, senderTelegramUsername]
+        );
+        if (sender) {
+          assignedByCode = sender.code;
+          assignedByName = sender.name;
+        }
+      }
+
+      const assignee = await getOne(
+        `SELECT * FROM users WHERE is_active = 1 AND (LOWER(telegram_username) = ? OR LOWER(telegram_username) = ?)` ,
+        [`@${mentionedUsername}`, mentionedUsername]
+      );
+
+if (!assignee) {
+        console.log('[Telegram Polling] No user linked for @' + mentionedUsername);
+        try {
+          const key = `${chatId}:${msgId}`;
+          if (!_alertedUnlinked.has(key)) {
+            _alertedUnlinked.add(key);
+            const alert = `⚠️ <b>Unlinked Telegram User</b>\n\nMessage: "${text}"\nMentioned: @${mentionedUsername}\n\nThis Telegram username is not linked to any active user account. Please link it in User Management.`;
+            await sendTelegram(cfg, chatId, alert);
+          }
+        } catch (e) {
+          // ignore
+        }
+        continue;
+      }
+
+      // Check if already processed by source_message_id
+      try {
+        const existing = await getOne(
+          'SELECT code FROM trs_tasks WHERE source_message_id = ? AND source_chat_id = ?',
+          [msgId, chatId]
+        );
+        if (existing) {
+          console.log('[Telegram Polling] Already processed message_id:', msgId, '-> task:', existing.code);
+          continue;
+        }
+      } catch (e) {
+        // ignore if columns missing
+      }
+      try {
+        const existing2 = await getOne(
+          'SELECT code FROM trs_tasks WHERE source_message_id = ?',
+          [msgId]
+        );
+        if (existing2) {
+          console.log('[Telegram Polling] Already processed message_id (any source):', msgId, '-> task:', existing2.code);
+          continue;
+        }
+      } catch (e) {
+        // ignore
+      }
+      // Extra guard: prevent same title+assignee created in last 30 seconds
+      try {
+        const recent = await getOne(
+          `SELECT code FROM trs_tasks WHERE assigned_to = ? AND title = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 30 SECOND) ORDER BY created_at DESC LIMIT 1`,
+          [assignee.code, taskData.title]
+        );
+        if (recent) {
+          console.log('[Telegram Polling] Skipping duplicate recent task for same assignee/title');
+          continue;
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      const aiResult = await parseChatMessageWithAI(text, mentionedUsername);
+
+      const deadline = aiResult.deadline || new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+      const assignedDate = new Date().toISOString().slice(0, 10);
+
+      const taskData = {
+        code: makeCode('trs'),
+        title: aiResult.title,
+        description: aiResult.description,
+        assigned_by: assignedByCode,
+        assigned_by_name: assignedByName,
+        assigned_to: assignee.code,
+        assigned_to_name: assignee.name,
+        department: assignee.department,
+        assigned_date: assignedDate,
+        deadline,
+        priority: aiResult.priority,
+        instructions: aiResult.scope,
+        scope: aiResult.scope,
+        quality_criteria: aiResult.quality_criteria,
+        progress: 0,
+        status: 'Pending',
+        source: 'telegram_chat',
+        source_message_id: String(message.message_id),
+        source_chat_id: chatId
+      };
+
+      console.log('=== TELEGRAM CHAT -> TRS TASK (Auto-Poll) ===');
+      console.log('Raw message:', text);
+      console.log('Sender (from):', `@${senderTelegramUsername}`);
+      console.log('Assigned by:', assignedByCode, assignedByName);
+      console.log('Mentioned user:', `@${mentionedUsername}`);
+      console.log('Assignee:', assignee.code, assignee.name);
+      console.log('AI Extracted:', JSON.stringify(aiResult, null, 2));
+      console.log('Task Data:', JSON.stringify(taskData, null, 2));
+      console.log('================================');
+
+      // Insert into database (handle schema variations)
+      try {
+        await query(
+          `INSERT INTO trs_tasks
+            (code, title, assigned_by, assigned_by_name, assigned_to, assigned_to_name, department,
+             description, assigned_date, deadline, priority, progress, instructions, scope, quality_criteria, status, source, source_message_id, source_chat_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [taskData.code, taskData.title, taskData.assigned_by, taskData.assigned_by_name,
+           taskData.assigned_to, taskData.assigned_to_name, taskData.department,
+           taskData.description, taskData.assigned_date, taskData.deadline,
+           taskData.priority, taskData.progress, taskData.instructions, taskData.scope,
+           taskData.quality_criteria, taskData.status, taskData.source, taskData.source_message_id, taskData.source_chat_id]
+        );
+      } catch (e) {
+        if (e?.message?.includes("Column count doesn't match") || e?.message?.includes('Unknown column') || e?.code === 'ER_BAD_FIELD_ERROR') {
+          await query(
+            `INSERT INTO trs_tasks
+              (code, title, assigned_by, assigned_by_name, assigned_to, assigned_to_name, department,
+               description, assigned_date, deadline, priority, progress, instructions, scope, quality_criteria, status)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [taskData.code, taskData.title, taskData.assigned_by, taskData.assigned_by_name,
+             taskData.assigned_to, taskData.assigned_to_name, taskData.department,
+             taskData.description, taskData.assigned_date, taskData.deadline,
+             taskData.priority, taskData.progress, taskData.instructions, taskData.scope,
+             taskData.quality_criteria, taskData.status]
+          );
+        } else if (e?.code === 'ER_DUP_ENTRY') {
+          console.log('[Telegram Polling] Duplicate prevented:', msgId);
+          continue;
+        } else {
+          throw e;
+        }
+      }
+      console.log('[Telegram Polling] Task saved to DB:', taskData.code);
+
+      // Reply to Telegram group
+      try {
+        const replyText = `✅ <b>Task Created</b>\n\n<b>Title:</b> ${taskData.title}\n<b>Assigned to:</b> ${assignee.name} (@${mentionedUsername})\n<b>Assigned by:</b> ${assignedByName}\n<b>Priority:</b> ${taskData.priority}\n<b>Deadline:</b> ${deadline}`;
+        
+        await sendTelegram(cfg, chatId, replyText, { buttonText: '🚀 View Task' });
+        console.log('[Telegram Polling] Reply sent to group');
+      } catch (err) {
+        console.error('[Telegram Polling] Failed to send reply:', err.message);
+      }
+
+      processed++;
+    } catch (err) {
+      console.error('[Telegram Polling] Error processing message:', err.message);
+    }
+  }
+
+  if (maxId > offset) {
+    try {
+      const newOffset = maxId + 1;
+      await query('UPDATE telegram_config SET update_offset = ? WHERE id = 1', [newOffset]);
+      bustTelegramConfig();
+      console.log('[Telegram Polling] Updated offset:', offset, '->', newOffset);
+    } catch (err) {
+      console.error('[Telegram Polling] Failed to update offset:', err.message);
+    }
+  }
+
+  return { processed };
+}
+
+export function startTelegramPolling(intervalMs = 20000) {
+  if (_pollingInterval) {
+    clearInterval(_pollingInterval);
+  }
+  console.log('[Telegram Polling] Starting auto-poll every', intervalMs, 'ms');
+  _pollingInterval = setInterval(async () => {
+    try {
+      const cfg = await getTelegramConfig(true);
+      if (cfg?.is_enabled && cfg?.bot_token && cfg?.main_group_chat_id) {
+        const result = await processTelegramMessages(cfg.bot_token);
+        if (result.processed > 0) {
+          console.log('[Telegram Polling] Processed', result.processed, 'messages');
+        }
+      }
+    } catch (err) {
+      console.error('[Telegram Polling] Error:', err.message);
+    }
+  }, intervalMs);
+  return _pollingInterval;
+}
+
+export function stopTelegramPolling() {
+  if (_pollingInterval) {
+    clearInterval(_pollingInterval);
+    _pollingInterval = null;
+    console.log('[Telegram Polling] Stopped');
+  }
 }

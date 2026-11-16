@@ -8,6 +8,7 @@ import { toMySqlDatetime } from '../services/auth.js';
 import { prepareSignature, uploadSignatureDataUrl } from '../services/s3.js';
 import { dispatchFlow } from '../services/notificationFlow.js';
 import { autoLockScan } from '../services/deadline.js';
+import { deleteProofFilesFromS3 } from '../services/proofFiles.js';
 
 const router = Router();
 const PRIORITIES = ['Urgent', 'High', 'Medium', 'Low'];
@@ -115,7 +116,7 @@ router.get('/', requireUser, asyncHandler(async (req, res) => {
 
   const rows = await query(
     `SELECT * FROM trs_tasks WHERE ${conds.length ? conds.join(' AND ') : '1=1'}
-     ORDER BY FIELD(status, 'Defaulted','Overdue','Pending','In Progress','Completed','Approved'), deadline ASC`,
+     ORDER BY (assigned_date IS NULL), assigned_date ASC, deadline ASC`,
     args
   );
   const withComments = await attachComments(rows);
@@ -204,7 +205,7 @@ router.post('/', requireUser, asyncHandler(async (req, res) => {
     status: 'Pending',
     priority: b.priority,
     notes: b.description || 'Direct task requested in TRS.',
-    details: `Task code: ${code}\nAssigned by ${creator?.name || actor.name}`,
+    details: `Assigned by ${creator?.name || actor.name}`,
     targetUserCode: assignedTo
   });
   await logActivity(actor, { action: 'TRS_CREATE', details: `Created ${code} for ${assignedTo}`, req });
@@ -255,6 +256,15 @@ router.put('/:code', requireUser, asyncHandler(async (req, res) => {
     if (b[col] !== undefined) { sets.push(`${col} = ?`); args.push(b[col] === null ? null : normalize(b[col])); }
   }
   if (b.escalated_at !== undefined) { sets.push('escalated_at = ?'); args.push(toMySqlDatetime(b.escalated_at)); }
+  // Keep status aligned with an explicit progression edit. Without this, a PUT
+  // (metadata/remarks save) could store progress=25 while status stayed
+  // 'Pending', and the client-side repair would flip it back on the next load.
+  if (b.progress !== undefined && Number.isFinite(Number(b.progress))
+    && !existing.submitted_at && !existing.evaluation_status && !existing.is_defaulted) {
+    const p = Math.min(Math.max(Number(b.progress), 0), 100);
+    sets.push('status = ?');
+    args.push(p === 0 ? 'Pending' : 'In Progress');
+  }
   if (!sets.length) throw new ApiError(400, 'Nothing to update.');
   await query(`UPDATE trs_tasks SET ${sets.join(', ')} WHERE code = ?`, [...args, req.params.code]);
   await logActivity(req.user, { action: 'TRS_UPDATE', details: `Updated ${req.params.code}`, req });
@@ -269,10 +279,18 @@ router.delete('/:code', requireUser, asyncHandler(async (req, res) => {
   if (!['admin', 'executive', 'hr'].includes(req.user.role) && existing.assigned_by !== req.user.code && !superiorCodes.includes(existing.assigned_to)) {
     throw new ApiError(403, 'Only the creator, an Admin, or the assignee\'s superior may delete this task.');
   }
-  if (existing.evaluation_status === 'Approved') throw new ApiError(400, 'Approved tasks cannot be deleted.');
+  // Delete the row FIRST, then clean up S3: if the S3 call fails we only leak an
+  // orphan object, whereas failing the other way round would leave a phantom row
+  // pointing at files that no longer exist. deleteProofFilesFromS3 never throws.
   await query('DELETE FROM trs_tasks WHERE code = ?', [req.params.code]);
-  await logActivity(req.user, { action: 'TRS_DELETE', details: `Deleted ${req.params.code} (${existing.title})`, req });
-  ok(res, { deleted: true });
+  const removedFiles = await deleteProofFilesFromS3([existing.multi_proof], [existing.proof_url]);
+  await logActivity(req.user, {
+    action: 'TRS_DELETE',
+    details: `Deleted ${req.params.code} (${existing.title})` +
+      (removedFiles.length ? ` and ${removedFiles.length} proof file(s) from S3` : ''),
+    req
+  });
+  ok(res, { deleted: true, files_deleted: removedFiles.length });
 }));
 
 /** POST /api/trs/:code/submit — staff submits completed work */
@@ -321,7 +339,7 @@ if (existing.status === 'Completed' || existing.status === 'Approved') {
     deadline: existing.deadline,
     status: 'Completed',
     notes: b.staff_remarks || b.submission_notes || 'Deliverable submitted.',
-    details: `Task ${req.params.code} completed on ${completionDate}\nProof: ${b.proof_url || 'N/A'}`,
+    details: `Completed on ${completionDate}\nProof: ${b.proof_url || 'N/A'}`,
     targetUserCode: existing.assigned_by
   });
   await logActivity(req.user, { action: 'TRS_SUBMIT', details: `Submitted ${req.params.code}`, req });
@@ -338,29 +356,51 @@ router.post('/:code/start', requireUser, requirePermission('submitTRSTasks'), as
 }));
 
 /** POST /api/trs/:code/progress — quick progress update */
-router.post('/:code/progress', requireUser, requirePermission('submitTRSTasks'), asyncHandler(async (req, res) => {
+router.post('/:code/progress', requireUser, asyncHandler(async (req, res) => {
   const p = Number(req.body?.progress);
   if (isNaN(p) || p < 0 || p > 100) throw new ApiError(400, 'progress must be 0-100.');
   const existing = await getOne('SELECT code, title, assigned_to, assigned_to_name, assigned_by, assigned_by_name, department, deadline FROM trs_tasks WHERE code = ?', [req.params.code]);
   if (!existing) throw new ApiError(404, 'Task not found.');
+
+  // Progression may be updated by the assignee, the delegating superior, anyone
+  // in the assignee's superior chain, management, or a user holding the
+  // submitTRSTasks feature flag. The relationship check keeps the slider working
+  // even if that optional flag was revoked for an owner/superior.
+  const isManagement = ['admin', 'executive', 'hr'].includes(req.user.role);
+  let allowed = isManagement || !!req.user.permissions?.submitTRSTasks;
+  if (!allowed) {
+    const subs = await getSubordinateCodes(req.user.code);
+    allowed = existing.assigned_to === req.user.code || existing.assigned_by === req.user.code || subs.includes(existing.assigned_to);
+  }
+  if (!allowed) throw new ApiError(403, 'You are not allowed to update this task progression.');
+
   // 100% deliberately stays 'In Progress': only POST /:code/submit may set Completed,
   // and that route rejects a task that is already Completed. So reaching full
   // progression means "ready to submit", never "submitted".
   const nextStatus = p === 0 ? 'Pending' : 'In Progress';
   await query(`UPDATE trs_tasks SET progress = ?, status = ? WHERE code = ?`, [p, nextStatus, req.params.code]);
-  await dispatchFlow({
-    eventType: 'TRS_STATUS',
-    title: existing.title,
-    staffName: existing.assigned_to_name,
-    superiorName: existing.assigned_by_name,
-    department: existing.department || undefined,
-    deadline: existing.deadline,
-    status: nextStatus,
-    score: p,
-    notes: req.body?.remark || null,
-    details: `Task ${existing.code} progress updated to ${p}%`,
-    targetUserCode: existing.assigned_by
+  await logActivity(req.user, {
+    action: 'TRS_PROGRESS',
+    details: `Set ${req.params.code} progression to ${p}%`,
+    req
   });
+  try {
+    const { dispatchFlow } = await import('../services/notificationFlow.js');
+    await dispatchFlow({
+      eventType: 'TRS_STATUS',
+      title: existing.title,
+      staffName: existing.assigned_to_name,
+      superiorName: existing.assigned_by_name,
+      department: existing.department || undefined,
+      deadline: existing.deadline,
+      status: nextStatus,
+      score: p,
+      notes: req.body?.remark || null,
+      details: `Progress updated to ${p}%`,
+      targetUserCode: existing.assigned_by,
+      toGroup: false
+    });
+  } catch {}
   ok(res, { code: req.params.code, progress: p });
 }));
 
@@ -451,11 +491,13 @@ router.post('/:code/evaluate', requireUser, asyncHandler(async (req, res) => {
   const status = isRevision ? 'In Progress' : 'Completed';
   const evaluationStatus = b.approved ? 'Approved' : (isRevision ? 'Revision' : 'Reviewed');
   await query(
-    `UPDATE trs_tasks
+     `UPDATE trs_tasks
      SET score = ?, feedback = ?, evaluation_status = ?, evaluation_date = ?, evaluated_by = ?,
          timeliness_score = ?, quality_score = ?, instruction_score = ?, scope_score = ?,
          accuracy_score = ?, late_penalty_waived = ?, status = ?,
-         revision_count = COALESCE(revision_count,0) + ? WHERE code = ?`,
+         revision_count = COALESCE(revision_count,0) + ?
+         ${isRevision ? ', progress = 75, submitted_at = NULL, completion_date = NULL' : ''}
+     WHERE code = ?`,
     [isRevision ? null : score, b.feedback ?? null, evaluationStatus,
       new Date().toISOString().slice(0, 10), req.user.code,
       timeliness, quality, instruction, scope, accuracy, waived ? 1 : 0, status,
@@ -483,8 +525,8 @@ router.post('/:code/evaluate', requireUser, asyncHandler(async (req, res) => {
     score: isRevision ? null : score,
     notes: b.feedback || (isRevision ? 'Task returned for revision.' : 'Task evaluated.'),
     details: isRevision
-      ? `Task ${req.params.code} sent back for revision (cycle ${revisionCount + 1} of 2)`
-      : `Task ${req.params.code} evaluation completed\nTimeliness: ${timeliness}/40${waived ? ' (waived)' : ''} | Quality: ${quality === null ? '—' : `${quality}/60`}`,
+      ? `Sent back for revision (cycle ${revisionCount + 1} of 2)`
+      : `Evaluation completed\nTimeliness: ${timeliness}/40${waived ? ' (waived)' : ''} | Quality: ${quality === null ? '—' : `${quality}/60`}`,
     targetUserCode: existing.assigned_to
   });
   await logActivity(req.user, {

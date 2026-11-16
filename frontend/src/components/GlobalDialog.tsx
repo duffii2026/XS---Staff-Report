@@ -9,6 +9,10 @@ export interface DialogRequest {
   kind: DialogKind;
   confirmText?: string;
   cancelText?: string;
+  /** Called when a single-action dialog's OK button is pressed. */
+  onConfirm?: () => void;
+  /** When false, backdrop clicks and Escape are ignored (e.g. session expired). */
+  dismissible?: boolean;
   onResolve?: (confirmed: boolean) => void;
 }
 
@@ -29,11 +33,16 @@ export function getDialog(): DialogRequest | null {
 }
 
 /** Non-blocking informational / error / success dialog (replaces window.alert). */
-export function showDialog(message: string, opts?: { title?: string; kind?: DialogKind }) {
+export function showDialog(
+  message: string,
+  opts?: { title?: string; kind?: DialogKind; onConfirm?: () => void; dismissible?: boolean }
+) {
   _dialog = {
     message: String(message ?? ''),
     title: opts?.title,
-    kind: opts?.kind || 'info'
+    kind: opts?.kind || 'info',
+    onConfirm: opts?.onConfirm,
+    dismissible: opts?.dismissible
   };
   emit();
 }
@@ -58,9 +67,13 @@ export function confirmDialog(
 
 export function closeDialog(confirmed = false) {
   const resolve = _dialog?.onResolve;
+  const onConfirm = _dialog?.onConfirm;
   _dialog = null;
   emit();
   if (resolve) resolve(confirmed);
+  if (confirmed && onConfirm) {
+    try { onConfirm(); } catch { /* ignore */ }
+  }
 }
 
 /** Mount once at the app root. */
@@ -70,7 +83,10 @@ export const GlobalDialog: React.FC = () => {
   useEffect(() => {
     if (!dialog) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeDialog(false);
+      if (e.key === 'Escape') {
+        if (dialog.kind !== 'confirm' && dialog.dismissible === false) return;
+        closeDialog(false);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -96,7 +112,7 @@ export const GlobalDialog: React.FC = () => {
   return (
     <div
       className="fixed inset-0 z-[90] bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4"
-      onClick={!isConfirm ? () => closeDialog(false) : undefined}
+      onClick={!isConfirm && dialog.dismissible !== false ? () => closeDialog(false) : undefined}
     >
       <div
         className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 animate-in fade-in zoom-in duration-200 overflow-hidden cursor-default"
@@ -124,7 +140,7 @@ export const GlobalDialog: React.FC = () => {
           <button
             type="button"
             autoFocus
-            onClick={() => closeDialog(isConfirm)}
+            onClick={() => closeDialog(isConfirm || !!dialog.onConfirm)}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold text-white shadow-xs cursor-pointer ${btnColor}`}
           >
             {isConfirm ? (dialog.confirmText || 'Confirm') : 'OK'}

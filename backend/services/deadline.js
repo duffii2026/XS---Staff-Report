@@ -96,7 +96,7 @@ async function scanOnce() {
         deadline: task.deadline,
         status: days < 0 ? 'OVERDUE' : 'Due Soon',
         notes: `${urgency} — ${task.title}. Assigned: ${task.assigned_to_name} | By: ${task.assigned_by_name}`,
-        details: `Task code: ${task.code}\nDeadline: ${task.deadline}`,
+        details: `Deadline: ${task.deadline}`,
         targetUserCode: code,
         toGroup: false
       });
@@ -172,8 +172,8 @@ export async function autoLockScan(opts = {}) {
       deadline: task.deadline,
       status: 'Auto-Locked (0%) — 7+ Days Unsubmitted',
       score: 0,
-      notes: `Task ${task.code} exceeded the 7-day submission cutoff with no deliverable. Superior administrative unlock (with justification) is required to submit.`,
-      details: `Task code: ${task.code}\nAssigned: ${task.assigned_to_name} | By: ${task.assigned_by_name}\nDeadline: ${task.deadline}\nLocked at 0% automatically.`,
+      notes: `This task exceeded the 7-day submission cutoff with no deliverable. Superior administrative unlock (with justification) is required to submit.`,
+      details: `Assigned: ${task.assigned_to_name} | By: ${task.assigned_by_name}\nDeadline: ${task.deadline}\nLocked at 0% automatically.`,
       targetUserCode: task.assigned_to
     });
 

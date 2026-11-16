@@ -2817,7 +2817,7 @@ export const PerformanceEvaluation: React.FC<PerformanceEvaluationProps> = ({ cu
               <div className="border-b-2 border-slate-800 pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                 <div>
                   <h1 className="text-xl font-black tracking-tight text-slate-900 uppercase">
-                    APA {import.meta.env.VITE_APP ?? '1'} Staff Evaluation & Performance Appraisal
+                    APA 2 Staff Evaluation & Performance Appraisal
                   </h1>
                   <p className="text-xs text-slate-600 font-medium mt-0.5">
                     Centralized T&R Weekly Checklist & TRS Superior Report Performance Document

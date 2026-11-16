@@ -1,8 +1,8 @@
 const root = __dirname;
 
-function backendApp(n) {
+function backendApp() {
   return {
-    name: `stf_reportb${n}`,
+    name: 'apa2-staff-report-api',
     cwd: root,
     script: 'dist/index.mjs',
     instances: 1,
@@ -18,5 +18,5 @@ function backendApp(n) {
 }
 
 module.exports = {
-  apps: [backendApp(1), backendApp(2), backendApp(3)]
+  apps: [backendApp()]
 };

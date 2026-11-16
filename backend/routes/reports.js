@@ -7,6 +7,7 @@ import { logActivity, notifyUser, makeCode } from '../services/audit.js';
 import { toMySqlDatetime } from '../services/auth.js';
 import { prepareSignature, uploadSignatureDataUrl } from '../services/s3.js';
 import { dispatchFlow, notifyUserTelegram } from '../services/notificationFlow.js';
+import { deleteProofFilesFromS3 } from '../services/proofFiles.js';
 
 const router = Router();
 const STATUSES = ['Draft', 'Submitted', 'Reviewed', 'Approved'];
@@ -148,6 +149,65 @@ router.delete('/draft/:staffCode/:year/:week', requireUser, asyncHandler(async (
   ok(res, { cleared: true });
 }));
 
+// ---------------------------------------------------------------
+// Weekly Summary Form (IRG-HR-FRM-WSUM-001 v1.1) — Sections A-J.
+// Lives in its own table `tr_weekly_summaries`, keyed by report code,
+// so `reports` never gains extra columns.
+// ---------------------------------------------------------------
+
+/** GET /api/reports/:code/summary */
+router.get('/:code/summary', requireUser, asyncHandler(async (req, res) => {
+  const row = await getOne('SELECT staff_code FROM reports WHERE code = ?', [req.params.code]);
+  if (!row) throw new ApiError(404, 'Report not found.');
+  const { canAccessUser } = await import('../services/scoping.js');
+  if (!(await canAccessUser(req.user, row.staff_code))) {
+    throw new ApiError(403, 'No access to this report.');
+  }
+  const sum = await getOne(
+    'SELECT summary_data FROM tr_weekly_summaries WHERE report_code = ?',
+    [req.params.code]
+  );
+  ok(res, { summary: sum ? parseJson(sum.summary_data) : null });
+}));
+
+/** PUT /api/reports/:code/summary — upsert the Weekly Summary Form */
+router.put('/:code/summary', requireUser, asyncHandler(async (req, res) => {
+  const report = await getOne('SELECT * FROM reports WHERE code = ?', [req.params.code]);
+  if (!report) throw new ApiError(404, 'Report not found.');
+  const superiorCodes = await getSubordinateCodes(req.user.code);
+  if (req.user.code !== report.staff_code
+    && !['admin', 'executive', 'hr'].includes(req.user.role)
+    && !superiorCodes.includes(report.staff_code)) {
+    throw new ApiError(403, 'Only the author, the reporter\'s superior, or an Admin may edit this summary.');
+  }
+  // Spec §6: the staff member can edit only while the status is Draft or returned.
+  if (report.status !== 'Draft' && report.status !== 'Submitted') {
+    throw new ApiError(400, `Cannot edit the summary of a report in status "${report.status}".`);
+  }
+  const summary = req.body?.summary;
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) {
+    throw new ApiError(400, 'summary is required.');
+  }
+  await query(
+    `INSERT INTO tr_weekly_summaries (report_code, staff_code, year, week_number, summary_data)
+     VALUES (?,?,?,?,?)
+     ON DUPLICATE KEY UPDATE summary_data = VALUES(summary_data), updated_at = CURRENT_TIMESTAMP`,
+    [
+      req.params.code,
+      report.staff_code,
+      Number(report.year),
+      Number(report.week_number),
+      JSON.stringify(summary)
+    ]
+  );
+  await logActivity(req.user, {
+    action: 'WEEKLY_SUMMARY_SAVE',
+    details: `Saved Weekly Summary Form for ${req.params.code}`,
+    req
+  });
+  ok(res, { saved: true });
+}));
+
 router.get('/:code', requireUser, asyncHandler(async (req, res) => {
   const row = await getOne('SELECT * FROM reports WHERE code = ?', [req.params.code]);
   if (!row) throw new ApiError(404, 'Report not found.');
@@ -187,8 +247,8 @@ router.post('/', requireUser, requirePermission('submitTRReport'), asyncHandler(
       (code, staff_code, staff_name, department, position, superior_code,
        year, quarter, month, week_number, start_date, end_date,
        checklist_items, tr_score, completion_score, timeliness_score, quality_score,
-       signature, notes, status)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       signature, notes, ai_summary, status)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       code,
       staffCode, staff.name, staff.department, staff.position, staff.superior_id,
@@ -196,7 +256,8 @@ router.post('/', requireUser, requirePermission('submitTRReport'), asyncHandler(
       b.start_date, b.end_date,
       JSON.stringify(checklistItems),
       scores.tr_score, scores.completion_score, scores.timeliness_score, scores.quality_score,
-      signature ? JSON.stringify(signature) : null, b.notes || null, 'Draft'
+      signature ? JSON.stringify(signature) : null, b.notes || null,
+      b.ai_summary ?? null, 'Draft'
     ]
   );
   await logActivity(actor, { action: 'REPORT_CREATE', details: `Created draft report ${code} for ${staffCode}`, req });
@@ -226,6 +287,7 @@ router.put('/:code', requireUser, asyncHandler(async (req, res) => {
   for (const [col, val] of Object.entries({
     checklist_items: checklistItems ? JSON.stringify(checklistItems) : undefined,
     notes: b.notes,
+    ai_summary: b.ai_summary,
     signature: signature !== undefined ? JSON.stringify(signature) : undefined,
     multi_proof: b.multi_proof ? JSON.stringify(b.multi_proof) : undefined,
     dispute: b.dispute ? JSON.stringify(b.dispute) : undefined,
@@ -249,6 +311,11 @@ escalated_to: b.escalated_to,
   }
   sets.push('updated_at = CURRENT_TIMESTAMP');
   await query(`UPDATE reports SET ${sets.join(', ')} WHERE code = ?`, [...args, req.params.code]);
+  await logActivity(req.user, {
+    action: 'REPORT_UPDATE',
+    details: `Edited ${req.params.code} (${b.notes ? 'notes updated' : 'checklist/fields updated'})`,
+    req
+  });
   ok(res, { code: req.params.code });
 }));
 
@@ -275,11 +342,11 @@ const existing = await getOne('SELECT * FROM reports WHERE code = ?', [req.param
   await query(
     `UPDATE reports
      SET checklist_items = ?, tr_score = ?, completion_score = ?, timeliness_score = ?, quality_score = ?,
-         signature = ?, notes = ?, status = 'Submitted', submission_date = ?,
+         signature = ?, notes = ?, ai_summary = COALESCE(?, ai_summary), status = 'Submitted', submission_date = ?,
          multi_proof = COALESCE(?, multi_proof), delay_reason = COALESCE(?, delay_reason)
      WHERE code = ?`,
     [JSON.stringify(checklistItems), trScore, scores.completion_score, scores.timeliness_score, scores.quality_score,
-     signature, b.notes ?? existing.notes, toMySqlDatetime(new Date()),
+     signature, b.notes ?? existing.notes, b.ai_summary ?? null, toMySqlDatetime(new Date()),
      b.multi_proof ? JSON.stringify(b.multi_proof) : null,
      b.delay_reason ?? null, req.params.code]
   );
@@ -470,7 +537,7 @@ router.post('/:code/extension/review', requireUser, requirePermission('viewTeamT
   ok(res, { code: req.params.code, decision });
 }));
 
-/** DELETE /api/reports/:code — author (or admin/executive); approved reports are kept */
+/** DELETE /api/reports/:code — the reporter's superior or admin/executive/hr may delete at any status (incl. Approved); authors may only delete their own reports while still a Draft */
 router.delete('/:code', requireUser, requirePermission('submitTRReport'), asyncHandler(async (req, res) => {
   const existing = await getOne('SELECT * FROM reports WHERE code = ?', [req.params.code]);
   if (!existing) throw new ApiError(404, 'Report not found.');
@@ -480,8 +547,14 @@ router.delete('/:code', requireUser, requirePermission('submitTRReport'), asyncH
     && !superiorCodes.includes(existing.staff_code)) {
     throw new ApiError(403, 'Only the author, the reporter\'s superior, or an Admin may delete this report.');
   }
-  if (existing.status === 'Approved') throw new ApiError(400, 'Approved reports cannot be deleted.');
+  const isManagement = ['admin', 'executive', 'hr'].includes(req.user.role) || superiorCodes.includes(existing.staff_code);
+  if (!isManagement && existing.status !== 'Draft') throw new ApiError(400, 'You can only delete your own report while it is still a Draft.');
+  // Delete the row (and its Weekly Summary Form side-table row) FIRST, then
+  // clean up S3. deleteProofFilesFromS3 never throws, so a failed S3 call can
+  // only leak an orphan object — never leave a row pointing at deleted files.
   await query('DELETE FROM reports WHERE code = ?', [req.params.code]);
+  await query('DELETE FROM tr_weekly_summaries WHERE report_code = ?', [req.params.code]).catch(() => {});
+  const removedFiles = await deleteProofFilesFromS3([existing.multi_proof], []);
   if (existing.superior_code) {
     await notifyUser({
       recipientCode: existing.superior_code, senderCode: req.user.code, senderName: req.user.name,
@@ -489,8 +562,13 @@ router.delete('/:code', requireUser, requirePermission('submitTRReport'), asyncH
       message: `${req.user.name} deleted ${existing.code}.`, linkTab: 'reports'
     }).catch(() => {});
   }
-  await logActivity(req.user, { action: 'REPORT_DELETE', details: `Deleted ${req.params.code}`, req });
-  ok(res, { deleted: true });
+  await logActivity(req.user, {
+    action: 'REPORT_DELETE',
+    details: `Deleted ${req.params.code}` +
+      (removedFiles.length ? ` and ${removedFiles.length} proof file(s) from S3` : ''),
+    req
+  });
+  ok(res, { deleted: true, files_deleted: removedFiles.length });
 }));
 
 /** POST /api/reports/:code/dispute — staff submits a score dispute */

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { MultiProofData, ProofItem } from '../types';
-import { uploadProofFile } from '../services/api';
+import { uploadProofFileWithProgress, FileUploadProgress } from '../services/api';
 import {
   Paperclip,
   Cloud,
@@ -9,11 +9,91 @@ import {
   Trash2,
   ExternalLink,
   FileText,
-  CheckCircle2,
   UploadCloud,
   AlertCircle,
-  Loader2
+  Download
 } from 'lucide-react';
+
+// Matches MAX_PROOF_BYTES in backend/routes/files.js
+const MAX_PROOF_BYTES = 30 * 1024 * 1024;
+
+/** Live position within a proof-file upload batch (drives the submit overlay). */
+export interface PendingProofUpload {
+  index: number;    // 0-based position in this batch
+  total: number;    // files in this batch
+  name: string;     // file currently being sent
+  percent: number;  // 0-100 for the CURRENT file
+}
+
+/**
+ * Upload every proof file that was chosen but not yet sent (pendingDataUrl set) to S3.
+ * Called on submit / explicit save — not when the user picks a file.
+ * Returns the same object when nothing is pending.
+ *
+ * `onProgress` fires on each file start, on every byte-level tick, and on
+ * completion — so the caller can render "File 1/2 … 47%".
+ */
+export async function uploadPendingProofs(
+  data: MultiProofData,
+  onProgress?: (s: PendingProofUpload) => void
+): Promise<MultiProofData> {
+  const pending = (data.files || []).filter(f => !f.url && f.pendingDataUrl);
+  if (pending.length === 0) return data;
+
+  const files = [...(data.files || [])];
+  for (let i = 0; i < pending.length; i++) {
+    const item = pending[i];
+    onProgress?.({ index: i, total: pending.length, name: item.name, percent: 0 });
+    const uploaded = await uploadProofFileWithProgress(
+      { name: item.name, dataUrl: item.pendingDataUrl! },
+      (p: FileUploadProgress) =>
+        onProgress?.({ index: i, total: pending.length, name: item.name, percent: p.percent })
+    );
+    onProgress?.({ index: i, total: pending.length, name: item.name, percent: 100 });
+          const base = typeof window !== 'undefined' ? window.location.origin : '';
+          const getUrl = (u: string) => {
+            if (!u) return u;
+            if (u.includes('reportupload/')) {
+              const name = u.split('reportupload/').pop();
+              return `${base}/reportupload/${name}`;
+            }
+            if (u.startsWith('/reportupload/')) return `${base}${u}`;
+            if (u.startsWith('/')) return `${base}${u}`;
+            if (u.startsWith('http://') || u.startsWith('https://')) {
+              try {
+                const urlObj = new URL(u);
+                if (urlObj.pathname.includes('reportupload/')) {
+                  const name = urlObj.pathname.split('reportupload/').pop();
+                  return `${base}/reportupload/${name}`;
+                }
+                return u;
+              } catch {
+                return `${base}/reportupload/${u.split('/').pop()}`;
+              }
+            }
+            return `${base}/reportupload/${u.split('/').pop()}`;
+          };
+          const baseUrl = getUrl(uploaded.url || '');
+          const uploadedItem: ProofItem = {
+      ...item,
+      url: baseUrl,
+      s3Key: uploaded.key,
+      uploadedAt: new Date().toISOString()
+    };
+    delete uploadedItem.pendingDataUrl;
+    const idx = files.findIndex(f => f.id === item.id);
+    if (idx >= 0) files[idx] = uploadedItem;
+    else files.push(uploadedItem);
+  }
+  return { ...data, files };
+}
+
+/** Drop never-uploaded files (autosaved drafts must not carry base64 payloads). */
+export function stripPendingProofs(data: MultiProofData): MultiProofData {
+  const files = (data.files || []).filter(f => !!f.url && !f.pendingDataUrl);
+  if (files.length === (data.files || []).length) return data;
+  return { ...data, files };
+}
 
 interface MultiProofUploaderProps {
   data?: MultiProofData;
@@ -34,45 +114,39 @@ export const MultiProofUploader: React.FC<MultiProofUploaderProps> = ({
   const [activeNewTgUrl, setActiveNewTgUrl] = useState('');
   const [isAddingTg, setIsAddingTg] = useState(false);
 
-  const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
 
-  // Upload PDF / image / document proof file to S3, store the returned URL in the proof data.
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Stage the chosen proof file locally. Nothing is sent to S3 here — the upload
+  // happens when the user clicks submit (see uploadPendingProofs).
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (readOnly || !onChange || !e.target.files || e.target.files.length === 0) return;
     const file = e.target.files[0];
-    const reader = new FileReader();
-
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      void (async () => {
-        setIsUploading(true);
-        setUploadError('');
-        try {
-          const uploaded = await uploadProofFile({ name: file.name, dataUrl });
-          const newFileItem: ProofItem = {
-            id: `file_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-            type: 'file',
-            name: file.name,
-            url: uploaded.url,
-            s3Key: uploaded.key,
-            size: file.size,
-            uploadedAt: new Date().toISOString()
-          };
-          onChange({
-            ...data,
-            files: [...(data.files || []), newFileItem]
-          });
-        } catch (err: any) {
-          setUploadError(err?.message || 'File upload failed. Please try again.');
-        } finally {
-          setIsUploading(false);
-        }
-      })();
-    };
-
-    reader.readAsDataURL(file);
     e.target.value = ''; // Reset input
+
+    if (file.size > MAX_PROOF_BYTES) {
+      setUploadError('File exceeds the 30 MB upload limit.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setUploadError('');
+      const newFileItem: ProofItem = {
+        id: `file_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        type: 'file',
+        name: file.name,
+        url: '',
+        size: file.size,
+        uploadedAt: new Date().toISOString(),
+        pendingDataUrl: reader.result as string
+      };
+      onChange({
+        ...data,
+        files: [...(data.files || []), newFileItem]
+      });
+    };
+    reader.onerror = () => setUploadError('Could not read the selected file. Please try again.');
+    reader.readAsDataURL(file);
   };
 
   const handleRemoveFile = (id: string) => {
@@ -171,7 +245,7 @@ export const MultiProofUploader: React.FC<MultiProofUploaderProps> = ({
                 {data.files?.length || 0}
               </span>
             </div>
-            <p className="text-[11px] text-slate-500 mb-2">Upload document, PDF, report screenshot</p>
+            <p className="text-[11px] text-slate-500 mb-2">Document, PDF, report screenshot — sent to storage when you click Submit</p>
 
             {/* List of uploaded files */}
             <div className="space-y-1.5 mb-2 max-h-36 overflow-y-auto">
@@ -191,18 +265,61 @@ export const MultiProofUploader: React.FC<MultiProofUploaderProps> = ({
                           ({formatFileSize(f.size)})
                         </span>
                       )}
+                      {!f.url && f.pendingDataUrl && (
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded-full shrink-0">
+                          pending · uploads on submit
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
-                      {f.url && (
-                        <a
-                          href={f.url}
-                          download={f.name}
-                          className="text-blue-600 hover:text-blue-800 p-1"
-                          title="Download / View file"
-                        >
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      )}
+                      {f.url && (() => {
+                        const base = typeof window !== 'undefined' ? window.location.origin : '';
+                        const getUrl = (u: string) => {
+                          if (!u) return '#';
+                          if (u.startsWith(base + '/reportupload/')) return u;
+                          if (u.includes('reportupload/')) {
+                            const name = u.split('reportupload/').pop();
+                            return `${base}/reportupload/${name}`;
+                          }
+                          if (u.startsWith('/reportupload/')) return `${base}${u}`;
+                          if (u.startsWith('/')) return `${base}${u}`;
+                          if (u.startsWith('http://') || u.startsWith('https://')) {
+                            try {
+                              const urlObj = new URL(u);
+                              if (urlObj.pathname.includes('reportupload/')) {
+                                const name = urlObj.pathname.split('reportupload/').pop();
+                                return `${base}/reportupload/${name}`;
+                              }
+                              return u;
+                            } catch {
+                              return `${base}/reportupload/${u.split('/').pop()}`;
+                            }
+                          }
+                          return `${base}/reportupload/${u.split('/').pop()}`;
+                        };
+                        const viewUrl = getUrl(f.url);
+                        return (
+                          <>
+                            <a
+                              href={viewUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-emerald-600 hover:text-emerald-800 p-1"
+                              title="View file"
+                            >
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                            <a
+                              href={viewUrl}
+                              download={f.name}
+                              className="text-blue-600 hover:text-blue-800 p-1"
+                              title="Download file"
+                            >
+                              <Download className="w-3 h-3" />
+                            </a>
+                          </>
+                        );
+                      })()}
                       {!readOnly && (
                         <button
                           type="button"
@@ -217,31 +334,18 @@ export const MultiProofUploader: React.FC<MultiProofUploaderProps> = ({
                   </div>
                 ))
               ) : (
-                <div className="text-[11px] text-slate-400 italic py-2 text-center">No files uploaded</div>
+                <div className="text-[11px] text-slate-400 italic py-2 text-center">No files chosen</div>
               )}
             </div>
           </div>
 
           {!readOnly && (
-            <label className={`mt-2 w-full py-1.5 px-2.5 font-semibold text-xs rounded-lg border flex items-center justify-center gap-1.5 transition-colors shadow-2xs ${
-              isUploading
-                ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-wait'
-                : 'bg-white hover:bg-slate-100 text-blue-700 border-blue-200 cursor-pointer'
-            }`}>
-              {isUploading ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Uploading to S3…
-                </>
-              ) : (
-                <>
-                  <UploadCloud className="w-3.5 h-3.5" /> + Upload File
-                </>
-              )}
+            <label className="mt-2 w-full py-1.5 px-2.5 font-semibold text-xs rounded-lg border flex items-center justify-center gap-1.5 transition-colors shadow-2xs bg-white hover:bg-slate-100 text-blue-700 border-blue-200 cursor-pointer">
+              <UploadCloud className="w-3.5 h-3.5" /> + Choose File
               <input
                 type="file"
                 className="hidden"
                 onChange={handleFileUpload}
-                disabled={isUploading}
                 accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.webp,.gif,.zip,.txt"
               />
             </label>

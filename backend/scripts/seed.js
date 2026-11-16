@@ -1,4 +1,4 @@
-// Seed script — creates apastaffreport (schema.sql) and loads starter data.
+// Seed script — loads starter data into the configured database.
 // Run: npm run seed  (from backend/)
 import mysql from 'mysql2/promise';
 
@@ -120,7 +120,7 @@ const NOTIFICATIONS = [
 
 const ACTIVITY_LOGS = [
   { code: 'log_seed_1', userCode: 'user_admin', username: 'admin', userRole: 'admin', action: 'SYSTEM_BOOT', details: 'System initialized with Master Admin credentials and automated department hierarchies.', ipAddress: '127.0.0.1' },
-  { code: 'log_seed_2', userCode: 'user_shawn', username: 'shawn', userRole: 'admin', action: 'SYSTEM_SEED', details: 'Database apastaffreport created and seeded with demo users, templates, TRS tasks, and appraisals.', ipAddress: '127.0.0.1' }
+  { code: 'log_seed_2', userCode: 'user_shawn', username: 'shawn', userRole: 'admin', action: 'SYSTEM_SEED', details: 'Configured database seeded with demo users, templates, TRS tasks, and appraisals.', ipAddress: '127.0.0.1' }
 ];
 
 // ---------------------------------------------------------------
@@ -141,7 +141,7 @@ function toDatetime(v) {
 }
 
 async function main() {
-  console.log('Seeding apastaffreport ...');
+  console.log(`Seeding ${env.DB_NAME} ...`);
 
   const schemaPath = path.resolve(__dirname, '../sql/schema.sql');
   const schema = fs.readFileSync(schemaPath, 'utf8');

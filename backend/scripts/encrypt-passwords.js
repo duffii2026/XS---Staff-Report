@@ -1,6 +1,6 @@
 // One-time migration: encrypt existing plaintext passwords with AES-256-GCM.
 // Run once per database:  npm run migrate:passwords  (from backend/)
-// Override target DB with ENV_FILE, e.g.:  cross-env ENV_FILE=.env3 npm run migrate:passwords
+// The script uses the configured App2 database; review env.js before running.
 //
 // - Idempotent: rows already stored as "enc:v1:..." are skipped, so it is safe
 //   to re-run after a failure.

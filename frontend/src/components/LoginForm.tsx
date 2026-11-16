@@ -69,11 +69,11 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
 
           <div className="relative">
             <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-500 text-white flex items-center justify-center font-black text-sm tracking-wide shadow-lg shadow-indigo-900/50">
-                APA
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-500 text-white flex items-center justify-center font-black text-[18px] tracking-wide shadow-lg shadow-indigo-900/50">
+                XS
               </div>
               <div>
-                <h1 className="text-xl font-bold tracking-tight text-white leading-tight">Staff Report {import.meta.env.VITE_APP ?? '1'}</h1>
+                <h1 className="text-xl font-bold tracking-tight text-white leading-tight">Staff Report</h1>
                 <p className="text-[11px] text-slate-400 font-medium">Centralized T&R / TRS Portal</p>
               </div>
             </div>
@@ -110,10 +110,10 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
         <div className="bg-white">
           {/* Mobile / Tablet header */}
           <div className="lg:hidden bg-gradient-to-b from-[#1C2138] via-[#14182B] to-[#0E1120] px-8 pt-8 pb-7 text-center flex flex-col items-center justify-center border-b border-white/5">
-            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-500 text-white flex items-center justify-center font-black text-sm tracking-wide shadow-inner">
-              APA
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-500 text-white flex items-center justify-center font-black text-[18px] tracking-wide shadow-inner">
+              XS
             </div>
-            <h2 className="mt-3 text-xl font-bold text-white tracking-tight">APA {import.meta.env.VITE_APP ?? '1'} - Staff Report</h2>
+            <h2 className="mt-3 text-xl font-bold text-white tracking-tight">Staff Report</h2>
             <p className="text-xs text-slate-400 mt-1 font-medium">Sign in with your username and password</p>
           </div>
 

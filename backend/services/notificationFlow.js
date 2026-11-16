@@ -14,6 +14,21 @@ export const TRIGGER_BY_EVENT = {
   APPRAISAL_APPROVED: 'notifyAppraisalApproved'
 };
 
+// Workflow notifications are private-chat only. The main Telegram group is
+// reserved for the AI task-assignment replies sent by the Telegram poller, so
+// none of these event types may be posted to the configured group.
+const PRIVATE_ONLY_EVENTS = new Set([
+  'TR_SUBMIT',
+  'TR_REVIEW',
+  'TRS_ASSIGN',
+  'TRS_STATUS',
+  'TRS_SUBMIT',
+  'TRS_SCORE',
+  'DEADLINE_ALERT',
+  'APPRAISAL_PENDING',
+  'APPRAISAL_APPROVED'
+]);
+
 const HEADERS = {
   TR_SUBMIT: ['📋', 'T&R WEEKLY REPORT SUBMITTED'],
   TR_REVIEW: ['✅', 'T&R REPORT REVIEWED & APPROVED'],
@@ -62,11 +77,11 @@ const BUTTON_BY_EVENT = {
   DEADLINE_ALERT: '⏰ Check Task & Deadline',
   APPRAISAL_PENDING: '✍️ Review Staff Appraisal',
   APPRAISAL_APPROVED: '🏆 View Approved Appraisal',
-  TEST_MESSAGE: '🚀 Open APA Staff Portal'
+  TEST_MESSAGE: '🚀 Open APA Staff 1 Portal'
 };
 
 export function buttonTextForEvent(eventType) {
-  return BUTTON_BY_EVENT[eventType] || '🚀 Open APA Staff Portal';
+  return BUTTON_BY_EVENT[eventType] || '🚀 Open APA Staff 1 Portal';
 }
 
 export function isTriggerEnabled(config, eventType) {
@@ -107,7 +122,8 @@ export async function dispatchFlow({
     const buttonText = buttonTextForEvent(eventType);
 
     const results = [];
-    if (toGroup && config.main_group_chat_id) {
+    const allowGroup = toGroup && eventType !== 'TRS_STATUS' && !PRIVATE_ONLY_EVENTS.has(eventType);
+    if (allowGroup && config.main_group_chat_id) {
       results.push(await sendTelegram(config, config.main_group_chat_id, text, { buttonText }));
     }
     if (targetUserCode) {

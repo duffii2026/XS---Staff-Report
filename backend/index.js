@@ -9,6 +9,7 @@ import routes from './routes/index.js';
 import filesRouter from './routes/files.js';
 import { notFoundHandler, errorHandler } from './middleware/errorHandler.js';
 import { startDeadlineDaemon } from './services/deadline.js';
+import { startTelegramPolling } from './services/telegram.js';
 
 const app = express();
 
@@ -19,7 +20,9 @@ app.use(cors({
   credentials: true,
   allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key']
 }));
-app.use(express.json({ limit: '25mb' }));
+// 30 MB files are sent as base64 (~40 MB on the wire) plus JSON overhead —
+// the body cap must comfortably exceed that or every large upload 413s.
+app.use(express.json({ limit: '60mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
@@ -42,6 +45,7 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 let daemon = null;
+let telegramPolling = null;
 app.listen(env.PORT, async () => {
   try {
     const okDb = await pingDatabase();
@@ -49,10 +53,13 @@ app.listen(env.PORT, async () => {
     if (okDb) {
       daemon = startDeadlineDaemon(env.DEADLINE_DAEMON_INTERVAL_MS);
       console.log('[deadline-daemon] started');
+      
+      // Start Telegram auto-polling for AI task parsing
+      telegramPolling = startTelegramPolling(20000); // Poll every 20 seconds
     }
   } catch (err) {
     console.error('[startup]', err.message);
   }
 });
 
-export { app, daemon };
+export { app, daemon, telegramPolling };

@@ -2,7 +2,7 @@
 -- APA Staff Report — v4 Feature Migration (new tables)
 -- 1-Click Telegram connect via deep-link handshake.
 -- NOTE: no USE statement here — migrate.js already selects the
--- active database (supports both apastaffreport & apastaffreport2222).
+-- configured APA 2 database.
 -- Applied idempotently by scripts/migrate.js
 -- ============================================================
 

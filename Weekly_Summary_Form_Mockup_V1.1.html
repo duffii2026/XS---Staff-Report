@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weekly Summary Form – Mock-up</title>
+<style>
+:root{
+  --forest:#1E5631; --mid:#2E7D32; --light:#E6F4EA; --lighter:#F3FAF5; --border:#BFE3C8;
+  --gold:#C9A227; --goldlight:#FBF3D5; --text:#1F2933; --muted:#6B7280;
+  --red:#B42318; --redbg:#FEE4E2; --amber:#B54708; --amberbg:#FEF0C7;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,Helvetica,sans-serif;color:var(--text);background:#F5F7F6;font-size:14px;line-height:1.45}
+.wrap{max-width:900px;margin:0 auto;padding:20px 16px 60px}
+.meta{font-size:12px;color:var(--muted);display:flex;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px}
+.note{background:var(--goldlight);border:1px solid var(--gold);border-radius:8px;padding:10px 14px;font-size:12.5px;margin-bottom:16px}
+.card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin-bottom:16px}
+.card h2{margin:0 0 4px;font-size:14px;letter-spacing:.06em;text-transform:uppercase;color:var(--forest)}
+.card h2 .tag{margin-left:8px;font-size:10px;letter-spacing:0;text-transform:none;background:var(--goldlight);color:#8a6d00;border-radius:999px;padding:2px 8px;vertical-align:middle}
+.card .sub{color:var(--muted);font-size:12.5px;margin:0 0 12px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:640px){.grid{grid-template-columns:1fr}}
+label{display:block;font-size:12px;font-weight:700;color:var(--forest);margin-bottom:4px}
+label .req{color:var(--red)}
+input[type=text],input[type=date],select,textarea{width:100%;padding:9px 10px;border:1px solid #CBD5CF;border-radius:8px;font:inherit;background:#fff}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--gold);border-color:var(--gold)}
+textarea{resize:vertical;min-height:70px}
+.ro{background:var(--lighter);border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--text)}
+.count{font-size:11px;color:var(--muted);text-align:right;margin-top:2px}
+.status-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+@media(max-width:640px){.status-row{grid-template-columns:1fr 1fr}}
+.opt{border:1.5px solid var(--border);border-radius:10px;padding:10px;text-align:center;cursor:pointer;background:#fff;font-weight:700;font-size:13px}
+.opt small{display:block;font-weight:400;color:var(--muted);font-size:11px}
+.opt.sel.g{background:var(--light);border-color:var(--mid);color:var(--forest)}
+.opt.sel.a{background:var(--amberbg);border-color:#F79009;color:var(--amber)}
+.opt.sel.o{background:#FFE6D5;border-color:#F97316;color:#9A3412}
+.opt.sel.r{background:var(--redbg);border-color:var(--red);color:var(--red)}
+.entry{border:1px solid var(--border);border-left:4px solid var(--gold);background:var(--lighter);border-radius:10px;padding:12px;margin-bottom:10px}
+.entry-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-weight:700;color:var(--forest);font-size:13px}
+.badge{display:inline-block;border-radius:999px;padding:2px 9px;font-size:11px;font-weight:700}
+.b-high{background:var(--redbg);color:var(--red)}.b-med{background:var(--amberbg);color:var(--amber)}.b-low{background:var(--light);color:var(--forest)}
+.btn{border:none;border-radius:8px;padding:9px 16px;font:inherit;font-weight:700;cursor:pointer}
+.btn-add{background:#fff;border:1.5px dashed var(--mid);color:var(--forest)}
+.btn-del{background:none;color:var(--red);padding:2px 6px;font-size:12px}
+.btn-primary{background:var(--forest);color:#fff}
+.btn-gold{background:var(--goldlight);color:#6b5400;border:1px solid var(--gold)}
+.check{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:8px;background:var(--lighter);border:1px solid var(--border)}
+.check input{margin-top:3px;width:16px;height:16px;accent-color:var(--forest)}
+.hidden{display:none}
+.footer-bar{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:6px}
+.fb{border:1px solid var(--border);background:var(--light);border-radius:10px;padding:12px 14px;color:var(--forest)}
+.fb h3{margin:0 0 4px;font-size:13px}
+.fb .when{float:right;font-size:12px;font-weight:400}
+.pill{display:inline-block;font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;background:var(--amberbg);color:var(--amber)}
+.err{color:var(--red);font-size:12px;margin-top:6px}
+.sep{height:1px;background:var(--border);margin:14px 0}
+.cl{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:8px 12px;border:1px solid var(--border);border-radius:10px;background:var(--lighter);margin-bottom:6px}
+.cl .t{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="meta">
+    <span><strong>IR Group</strong> &nbsp;|&nbsp; Weekly Summary Form – Screen mock-up</span>
+    <span>Doc code: IRG-HR-FRM-WSUM-001 &nbsp;|&nbsp; Version 1.1</span>
+  </div>
+  <div class="note"><strong>Mock-up for the web developer.</strong> Shows layout and behaviour only; data is sample. Staff and week information already exists in the system, so it is not repeated here. Appears on the same page as the weekly JD checklist, below it and above the Superior Evaluation Feedback box. Click around to see how the fields behave.</div>
+
+  <!-- Checklist reminder -->
+  <div class="card">
+    <h2>Job Description Checklist Submissions</h2>
+    <p class="sub">Existing section – shown here only for context. 12 of 21 applicable tasks completed (1 marked N/A)</p>
+    <div class="cl"><span>T&amp;R system update &amp; accuracy check</span><span class="t">Weekly (fixed) · Done</span></div>
+    <div class="cl"><span>HR Master List update check</span><span class="t">Weekly (fixed) · Incomplete</span></div>
+    <div class="cl"><span>… (other checklist tasks)</span><span class="t"></span></div>
+  </div>
+
+  <!-- A -->
+  <div class="card">
+    <h2>A. Overall week status <span class="tag">Required</span></h2>
+    <p class="sub">How did your week go overall?</p>
+    <div class="status-row" id="statusRow">
+      <div class="opt g" data-v="On track">On track<small>Everything normal</small></div>
+      <div class="opt a" data-v="Minor delays">Minor delays<small>Small slips</small></div>
+      <div class="opt o" data-v="Significant delays">Significant delays<small>Work is behind</small></div>
+      <div class="opt r" data-v="Blocked">Blocked<small>Cannot continue</small></div>
+    </div>
+    <label for="overall">Overall comment (optional)</label>
+    <textarea id="overall" maxlength="300" style="min-height:56px" placeholder="One or two sentences that sum up the week."></textarea>
+  </div>
+
+  <!-- B Meetings -->
+  <div class="card">
+    <h2>B. Meetings &amp; minutes of meeting <span class="tag">Required</span></h2>
+    <p class="sub">If a meeting was held, its minutes of meeting must be attached. Up to 10 meetings.</p>
+    <label>Did you have any meeting this week? <span class="req">*</span></label>
+    <div class="status-row" id="mtgRow" style="grid-template-columns:1fr 1fr;max-width:320px">
+      <div class="opt g" data-v="Yes">Yes</div>
+      <div class="opt g" data-v="No">No</div>
+    </div>
+    <div id="mtgBox" class="hidden">
+      <div id="meetings"></div>
+      <button class="btn btn-add" id="addMtg" type="button">+ Add a meeting</button>
+    </div>
+  </div>
+
+  <!-- C -->
+  <div class="card">
+    <h2>C. Problems &amp; issues <span class="tag">Required</span></h2>
+    <p class="sub">Tick "no problems" or add at least one problem. Up to 5 entries.</p>
+    <div class="check">
+      <input type="checkbox" id="noIssues">
+      <label for="noIssues" style="margin:0;color:var(--text);font-weight:400">No problems or issues this week</label>
+    </div>
+    <div id="issuesBox" style="margin-top:12px">
+      <div id="issues"></div>
+      <button class="btn btn-add" id="addIssue" type="button">+ Add a problem</button>
+    </div>
+  </div>
+
+  <!-- D -->
+  <div class="card">
+    <h2>D. Challenges &amp; risks <span class="tag">Optional</span></h2>
+    <p class="sub">Not a problem yet, but may become one soon. Up to 3 entries.</p>
+    <div id="risks"></div>
+    <button class="btn btn-add" id="addRisk" type="button">+ Add a challenge or risk</button>
+  </div>
+
+  <!-- E -->
+  <div class="card">
+    <h2>E. Support or decision needed <span class="tag">Optional</span></h2>
+    <p class="sub">What do you need from your superior or others? Up to 3 entries.</p>
+    <div id="needs"></div>
+    <button class="btn btn-add" id="addNeed" type="button">+ Add a request</button>
+  </div>
+
+  <!-- F -->
+  <div class="card">
+    <h2>F. Suggestions &amp; improvement ideas <span class="tag">Optional</span></h2>
+    <p class="sub">Ideas to improve the work, system or process. Up to 3 entries.</p>
+    <div id="ideas"></div>
+    <button class="btn btn-add" id="addIdea" type="button">+ Add a suggestion</button>
+  </div>
+
+  <!-- G H -->
+  <div class="card">
+    <h2>G. Achievements &amp; highlights <span class="tag">Optional</span></h2>
+    <p class="sub">Good results, praise received, or work that went especially well.</p>
+    <textarea maxlength="500" placeholder="Write here..."></textarea>
+    <div class="sep"></div>
+    <h2>H. Focus for next week <span class="tag">Optional</span></h2>
+    <p class="sub">Top priorities for the coming week.</p>
+    <div class="grid" style="grid-template-columns:1fr">
+      <input type="text" maxlength="150" placeholder="Priority 1">
+      <input type="text" maxlength="150" placeholder="Priority 2">
+      <input type="text" maxlength="150" placeholder="Priority 3">
+    </div>
+  </div>
+
+  <!-- I -->
+  <div class="card">
+    <h2>I. Attachments <span class="tag">Optional</span></h2>
+    <p class="sub">Up to 5 files, 10 MB each. PDF, JPG, PNG, DOCX, XLSX.</p>
+    <input type="file" multiple>
+  </div>
+
+  <!-- J -->
+  <div class="card">
+    <h2>J. Confirmation &amp; submit</h2>
+    <div class="check">
+      <input type="checkbox" id="confirm">
+      <label for="confirm" style="margin:0;color:var(--text);font-weight:400">I confirm that the information in this weekly checklist and summary is correct.</label>
+    </div>
+    <div class="err hidden" id="errBox"></div>
+    <div class="footer-bar">
+      <button class="btn btn-gold" type="button" id="draftBtn">Save draft</button>
+      <button class="btn btn-primary" type="button" id="submitBtn">Submit checklist &amp; summary</button>
+    </div>
+    <p class="sub" style="margin:10px 0 0;text-align:right" id="saved"></p>
+  </div>
+
+  <!-- K -->
+  <div class="card">
+    <h2>K. Superior review <span class="tag">Superior only</span></h2>
+    <p class="sub">Filled in by the superior only. Uses the same Superior Evaluation Feedback box as the checklist.</p>
+    <div class="grid">
+      <div>
+        <label>Review status (auto)</label>
+        <div class="ro" id="kStatus">Pending review</div>
+      </div>
+      <div>
+        <label>Reviewer (auto)</label>
+        <div class="ro">Superior name (from system)</div>
+      </div>
+    </div>
+    <div class="fb" style="margin-top:12px">
+      <h3>Superior Evaluation Feedback <span class="when">Date and time shown after review</span></h3>
+      <label style="margin-top:6px">Decision <span class="req">*</span></label>
+      <div class="status-row" id="decRow" style="grid-template-columns:1fr 1fr;max-width:340px;margin-top:4px;margin-bottom:0">
+        <div class="opt g" data-v="Approved">Approved<small>Work accepted &amp; complete</small></div>
+        <div class="opt r" data-v="Needs revision">Needs revision<small>Returned with feedback</small></div>
+      </div>
+      <label for="kFeedback" style="margin-top:10px">Feedback <span class="req hidden" id="kFbReq">*</span> <span style="font-weight:400;color:var(--muted)">max 500</span></label>
+      <textarea id="kFeedback" maxlength="500" placeholder="Detail strengths, feedback, or specific rework instructions if requesting revision..."></textarea>
+      <div class="sub" style="margin:4px 0 0">Required when "Needs revision" is chosen.</div>
+    </div>
+    <div class="grid" style="margin-top:12px">
+      <div>
+        <label>Reviewed date &amp; time (auto)</label>
+        <div class="ro" id="kReviewed">Shown after review</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+var $=function(s){return document.querySelector(s)};
+var weekStatus=null;
+
+// B
+document.querySelectorAll('#statusRow .opt').forEach(function(o){
+  o.addEventListener('click',function(){
+    document.querySelectorAll('#statusRow .opt').forEach(function(x){x.classList.remove('sel')});
+    o.classList.add('sel'); weekStatus=o.dataset.v;
+  });
+});
+// Character counter on every text field (spec 6)
+function attachCounters(root){
+  (root||document).querySelectorAll('input[type=text][maxlength],textarea[maxlength]').forEach(function(el){
+    if(el.dataset.counted)return;
+    el.dataset.counted='1';
+    var box=document.createElement('div'); box.className='count';
+    var sp=document.createElement('span'); sp.textContent='0';
+    box.appendChild(sp); box.appendChild(document.createTextNode('/'+el.maxLength));
+    el.insertAdjacentElement('afterend',box);
+    var upd=function(){sp.textContent=el.value.length};
+    el.addEventListener('input',upd); upd();
+  });
+}
+
+// Spec 6: an empty entry (added but nothing typed) is removed automatically on submit
+function entryIsEmpty(el){
+  var fs=el.querySelectorAll('input[type=text],input[type=date],textarea,select,input[type=file]');
+  for(var i=0;i<fs.length;i++){
+    var f=fs[i];
+    if(f.type==='file'){ if(f.files.length)return false; }
+    else if(f.tagName==='SELECT'){ if(f.selectedIndex!==0)return false; }
+    else if(f.value.trim()!=='') return false;
+  }
+  return true;
+}
+var ENTRY_BOXES=[
+  {box:'#issues',title:'Problem',max:5,btn:'#addIssue'},
+  {box:'#risks',title:'Risk',max:3,btn:'#addRisk'},
+  {box:'#needs',title:'Request',max:3,btn:'#addNeed'},
+  {box:'#ideas',title:'Suggestion',max:3,btn:'#addIdea'},
+  {box:'#meetings',title:'Meeting',max:10,btn:'#addMtg'}
+];
+function stripEmptyEntries(){
+  ENTRY_BOXES.forEach(function(s){
+    var box=$(s.box);
+    Array.prototype.slice.call(box.children).forEach(function(e){ if(entryIsEmpty(e)) e.remove(); });
+    renumber(s.box,s.title); toggleAdd(s.box,s.max,s.btn);
+  });
+}
+
+// Related task list = this staff member's own checklist tasks (sample)
+var TASKS=['T&R system update & accuracy check','HR Master List update check','PEVA, DPTT, DRR2F, ATP & KPI update monitoring','Monthly T&R log archive & reset','Payroll review & approval before submission'];
+function opts(list){return list.map(function(x){return '<option>'+x.replace(/&/g,'&amp;')+'</option>'}).join('')}
+
+function addEntry(boxId,max,btnId,html,title){
+  var box=$(boxId);
+  if(box.children.length>=max)return;
+  var d=document.createElement('div'); d.className='entry';
+  d.innerHTML='<div class="entry-head"><span class="ttl"></span><button type="button" class="btn btn-del">Remove</button></div>'+html;
+  box.appendChild(d);
+  attachCounters(d);
+  d.querySelector('.btn-del').addEventListener('click',function(){d.remove();renumber(boxId,title);toggleAdd(boxId,max,btnId)});
+  renumber(boxId,title); toggleAdd(boxId,max,btnId);
+  return d;
+}
+function renumber(boxId,title){[].forEach.call($(boxId).children,function(e,i){e.querySelector('.ttl').textContent=title+' '+(i+1)})}
+function toggleAdd(boxId,max,btnId){$(btnId).style.display=$(boxId).children.length>=max?'none':''}
+
+function issueHtml(){return ''+
+'<div class="grid">'+
+'<div style="grid-column:1/-1"><label>Problem title <span class="req">*</span></label><input type="text" maxlength="100" placeholder="Short name of the problem"></div>'+
+'<div><label>Category <span class="req">*</span></label><select><option value="">Select…</option>'+opts(['Workload','System / tool','People / team','Process / policy','Resources / equipment','External party','Other'])+'</select></div>'+
+'<div><label>Severity <span class="req">*</span></label><select class="sev"><option value="">Select…</option><option>Low – small effect, handled alone</option><option>Medium – slows the work</option><option>High – work is stopped or at risk</option></select></div>'+
+'<div style="grid-column:1/-1"><label>Description <span class="req">*</span></label><textarea maxlength="500" placeholder="What happened, when, and the effect on the work."></textarea></div>'+
+'<div><label>Related task (optional)</label><select><option>Not related to a task</option>'+opts(TASKS)+'</select></div>'+
+'<div><label>Current state <span class="req">*</span></label><select><option value="">Select…</option><option>Resolved</option><option>Ongoing</option><option>Need help</option></select></div>'+
+'</div>'}
+function riskHtml(){return ''+
+'<div class="grid"><div style="grid-column:1/-1"><label>Challenge or risk <span class="req">*</span></label><textarea maxlength="400"></textarea></div>'+
+'<div style="grid-column:1/-1"><label>Possible impact (optional)</label><input type="text" maxlength="300" placeholder="What could happen if it is not handled."></div></div>'}
+function needHtml(){return ''+
+'<div class="grid"><div style="grid-column:1/-1"><label>What is needed <span class="req">*</span></label><textarea maxlength="300" placeholder="The support, approval or decision requested."></textarea></div>'+
+'<div><label>Needed from <span class="req">*</span></label><select><option value="">Select…</option><option>Direct superior</option><option>Another department</option><option>IT / system team</option><option>Other</option></select></div>'+
+'<div><label>Needed by (optional)</label><input type="date" min="2026-10-26"></div></div>'}
+function ideaHtml(){return ''+
+'<div class="grid"><div style="grid-column:1/-1"><label>Suggestion <span class="req">*</span></label><textarea maxlength="500"></textarea></div>'+
+'<div><label>Area <span class="req">*</span></label><select><option value="">Select…</option><option>Process / workflow</option><option>System / tool</option><option>Team / people</option><option>Cost or time saving</option><option>Policy</option><option>Other</option></select></div>'+
+'<div><label>Expected benefit (optional)</label><input type="text" maxlength="300"></div></div>'}
+
+$('#addIssue').addEventListener('click',function(){var d=addEntry('#issues',5,'#addIssue',issueHtml(),'Problem');
+  d.querySelector('.sev').addEventListener('change',function(e){
+    var old=d.querySelector('.badge'); if(old)old.remove();
+    var v=e.target.value; if(!v)return;
+    var b=document.createElement('span'); b.className='badge '+(v[0]==='H'?'b-high':v[0]==='M'?'b-med':'b-low'); b.textContent=v.split(' ')[0];
+    d.querySelector('.ttl').after(b); b.style.marginLeft='8px';
+  });
+});
+
+// B meetings
+var hadMtg=null;
+document.querySelectorAll('#mtgRow .opt').forEach(function(o){
+  o.addEventListener('click',function(){
+    document.querySelectorAll('#mtgRow .opt').forEach(function(x){x.classList.remove('sel')});
+    o.classList.add('sel'); hadMtg=o.dataset.v;
+    $('#mtgBox').classList.toggle('hidden',hadMtg!=='Yes');
+    if(hadMtg==='Yes' && $('#meetings').children.length===0) $('#addMtg').click();
+  });
+});
+function mtgHtml(){return ''+
+'<div class="grid">'+
+'<div style="grid-column:1/-1"><label>Meeting title <span class="req">*</span></label><input type="text" maxlength="100" placeholder="Name or topic of the meeting"></div>'+
+'<div><label>Meeting date <span class="req">*</span></label><input type="date" min="2026-10-26" max="2026-10-30"></div>'+
+'<div><label>Meeting type <span class="req">*</span></label><select><option value="">Select…</option><option>Team meeting</option><option>With superior / management</option><option>Cross-department</option><option>External party / client</option><option>Training / briefing</option><option>Other</option></select></div>'+
+'<div style="grid-column:1/-1"><label>Attendees <span class="req">*</span></label><textarea maxlength="300" style="min-height:50px" placeholder="Names or departments who attended"></textarea></div>'+
+'<div style="grid-column:1/-1"><label>Key decisions / outcomes (optional)</label><textarea maxlength="400" style="min-height:50px" placeholder="Short summary. Full detail is in the minutes."></textarea></div>'+
+'<div style="grid-column:1/-1"><label>Minutes of meeting <span class="req">*</span> <span style="font-weight:400;color:var(--muted)">PDF, DOCX, JPG, PNG · max 10 MB</span></label><input type="file" class="mfile" accept=".pdf,.docx,.jpg,.jpeg,.png"></div>'+
+'</div>'}
+$('#addMtg').addEventListener('click',function(){addEntry('#meetings',10,'#addMtg',mtgHtml(),'Meeting')});
+$('#addRisk').addEventListener('click',function(){addEntry('#risks',3,'#addRisk',riskHtml(),'Risk')});
+$('#addNeed').addEventListener('click',function(){addEntry('#needs',3,'#addNeed',needHtml(),'Request')});
+$('#addIdea').addEventListener('click',function(){addEntry('#ideas',3,'#addIdea',ideaHtml(),'Suggestion')});
+
+$('#noIssues').addEventListener('change',function(e){$('#issuesBox').classList.toggle('hidden',e.target.checked)});
+
+function save(msg){$('#saved').textContent=msg+' '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+$('#draftBtn').addEventListener('click',function(){save('Draft saved at')});
+
+$('#submitBtn').addEventListener('click',function(){
+  stripEmptyEntries();
+  var errs=[];
+  if(!weekStatus)errs.push('Section A: choose the overall week status.');
+  if(!hadMtg)errs.push('Section B: answer "Did you have any meeting this week?"');
+  if(hadMtg==='Yes'){
+    var mt=$('#meetings').children;
+    if(mt.length===0)errs.push('Section B: add at least one meeting.');
+    [].forEach.call(mt,function(e,i){
+      var t=e.querySelector('input[type=text]').value.trim();
+      var nm=t?('"'+t+'"'):('Meeting '+(i+1));
+      var ok=t && e.querySelector('input[type=date]').value && e.querySelector('select').value && e.querySelector('textarea').value.trim();
+      if(!ok)errs.push('Section B, '+nm+': complete all required fields.');
+      if(!e.querySelector('.mfile').files.length)errs.push('Section B, '+nm+': minutes of meeting are not attached.');
+    });
+  }
+  var issues=$('#issues').children.length;
+  if(!$('#noIssues').checked && issues===0)errs.push('Section C: tick "No problems or issues this week" or add at least one problem.');
+  if(!$('#noIssues').checked){
+    [].forEach.call($('#issues').children,function(e,i){
+      var ok=true; e.querySelectorAll('input[type=text],textarea').forEach(function(x,j){if(j<2 && !x.value.trim())ok=false});
+      e.querySelectorAll('select').forEach(function(s,j){if(j!==2 && !s.value)ok=false});
+      if(!ok)errs.push('Section C, Problem '+(i+1)+': complete all required fields.');
+    });
+  }
+  if(!$('#confirm').checked)errs.push('Section J: tick the confirmation.');
+  var box=$('#errBox');
+  if(errs.length){box.innerHTML=errs.map(function(x){return '• '+x}).join('<br>');box.classList.remove('hidden');}
+  else{box.classList.add('hidden');save('Submitted at');}
+});
+
+// K: superior decision auto-fills review status + reviewed timestamp
+document.querySelectorAll('#decRow .opt').forEach(function(o){
+  o.addEventListener('click',function(){
+    document.querySelectorAll('#decRow .opt').forEach(function(x){x.classList.remove('sel')});
+    o.classList.add('sel');
+    $('#kStatus').textContent='Reviewed';
+    $('#kReviewed').textContent=new Date().toLocaleString([], {year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    $('#kFbReq').classList.toggle('hidden',o.dataset.v!=='Needs revision');
+  });
+});
+
+// Character counter on every text field (spec 6)
+attachCounters(document);
+</script>
+</body>
+</html>

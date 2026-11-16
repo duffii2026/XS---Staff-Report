@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { User, TRSTask, MultiProofData } from '../types';
 import { SignatureImage } from './SignatureImage';
 import { showDialog, confirmDialog } from './GlobalDialog';
+import { Loader2 } from 'lucide-react';
 import {
   getVisibleTRSTasksForUser,
   saveTRSTask,
+  createTRSTask,
   updateTRSTaskProgress,
   escalateTRSTask,
   getDepartments,
@@ -22,7 +24,7 @@ import {
   lockTRSTask
 } from '../services/storage';
 import { getDaysDifferenceFromToday, calculateTimelinessScore } from '../services/deadlineAlertService';
-import { MultiProofUploader } from './MultiProofUploader';
+import { MultiProofUploader, uploadPendingProofs } from './MultiProofUploader';
 import {
   ListTodo,
   Clock,
@@ -64,7 +66,6 @@ import {
   CornerDownRight,
   RefreshCcw,
   History,
-  Loader2,
   ChevronDown,
   Unlock
 } from 'lucide-react';
@@ -78,6 +79,10 @@ interface TRSReportViewProps {
 
 export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => {
   const [tasks, setTasks] = useState<TRSTask[]>([]);
+  // New tasks appear here until POST /trs succeeds. They must not enter the
+  // table before they exist on the server, otherwise a progression change on
+  // the temporary id fails with 404 "Task not found."
+  const [pendingTasks, setPendingTasks] = useState<TRSTask[]>([]);
   const [activeTask, setActiveTask] = useState<TRSTask | null>(null);
   const [detailModalSource, setDetailModalSource] = useState<'table' | 'timeline' | null>(null);
   const [viewMode, setViewMode] = useState<'cards' | 'table' | 'timeline'>('table');
@@ -144,6 +149,7 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
   // New task form state (with 3 superior criteria)
   const [taskTitle, setTaskTitle] = useState('');
   const [assigneeId, setAssigneeId] = useState('');
+  const [assignedById, setAssignedById] = useState('');
   const [taskDesc, setTaskDesc] = useState('');
   const [taskInstructions, setTaskInstructions] = useState('');
   const [taskScope, setTaskScope] = useState('');
@@ -151,8 +157,19 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
   const [taskProject, setTaskProject] = useState('');
   const [isCustomProject, setIsCustomProject] = useState(false);
   const [taskPriority, setTaskPriority] = useState<'Urgent' | 'High' | 'Medium' | 'Low'>('Medium');
+  const [assignedDate, setAssignedDate] = useState('');
   const [deadlineDate, setDeadlineDate] = useState('');
   const [feedbackMsg, setFeedbackMsg] = useState('');
+  const [progressToast, setProgressToast] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  const progressToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showProgressToast = (text: string, type: 'success' | 'error' = 'success') => {
+    if (progressToastTimer.current) clearTimeout(progressToastTimer.current);
+    setProgressToast({ text, type });
+    progressToastTimer.current = setTimeout(() => setProgressToast(null), 3500);
+  };
+  useEffect(() => () => {
+    if (progressToastTimer.current) clearTimeout(progressToastTimer.current);
+  }, []);
   const [taskToDeleteId, setTaskToDeleteId] = useState<string | null>(null);
   const [showCriteria, setShowCriteria] = useState<boolean>(true);
 
@@ -183,14 +200,10 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
   //    edit/delete. The assignee keeps only their own actions: Task Progression,
   //    remarks, and the deliverable submission.
   const canManageTask = (t: TRSTask): boolean => {
-    // Approved & Completed is the final grade: the record is locked, so Edit
-    // and Delete are hidden once evaluationStatus is 'Approved'.
-    if (t.evaluationStatus === 'Approved') return false;
+    if (['admin', 'executive', 'hr'].includes(currentUser.role)) return true;
     // Owner of a self-assigned task manages it.
     if (t.assignedTo === currentUser.id) return t.assignedBy === t.assignedTo;
-    return ['admin', 'executive', 'hr'].includes(currentUser.role) ||
-      t.assignedBy === currentUser.id ||
-      subIds.has(t.assignedTo);
+    return t.assignedBy === currentUser.id || subIds.has(t.assignedTo);
   };
   // Only the assignee's DIRECT superior (reporting line) may administratively
   // unlock an auto-locked (defaulted) TRS task — no blanket manager/admin access,
@@ -246,7 +259,10 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
       if (t.isDefaulted || t.status === 'Defaulted') return t;
       const p = t.progress !== undefined ? t.progress : (t.status === 'Completed' ? 100 : (t.status === 'In Progress' ? 50 : 0));
       let targetStatus: TRSTask['status'] = t.status;
-      if (p >= 100 && t.status !== 'Completed' && t.evaluationStatus !== 'Revision') {
+      // 100% means "ready to submit", not Completed: only POST /submit may mark
+      // a task Completed. Repairing it to Completed here caused a write (and a
+      // full background sync) on every progress adjustment for 100% tasks.
+      if (p >= 100 && t.submittedAt && t.status !== 'Completed' && t.evaluationStatus !== 'Revision') {
         targetStatus = 'Completed';
       } else if (p === 0 && t.status === 'Completed' && !t.submittedAt) {
         targetStatus = 'Pending';
@@ -254,17 +270,18 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
         targetStatus = 'In Progress';
       }
 
-      if (targetStatus !== t.status || t.progress === undefined) {
-        const repaired: TRSTask = {
-          ...t,
-          progress: p,
-          status: targetStatus,
-          completionDate: targetStatus === 'Completed' ? (t.completionDate || new Date().toISOString().split('T')[0]) : t.completionDate
-        };
-        saveTRSTask(repaired, currentUser, 'update');
-        return repaired;
-      }
-      return t;
+      if (targetStatus === t.status && t.progress !== undefined) return t;
+
+      const repaired: TRSTask = {
+        ...t,
+        progress: p,
+        status: targetStatus,
+        completionDate: targetStatus === 'Completed' ? (t.completionDate || new Date().toISOString().split('T')[0]) : t.completionDate
+      };
+      // Only persist a real status change. A missing progress value is just a
+      // display fallback and should not trigger a write/reload.
+      if (targetStatus !== t.status) saveTRSTask(repaired, currentUser, 'update');
+      return repaired;
     });
 
     setTasks(list);
@@ -330,6 +347,7 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
     // Default to the first index in the assignee list (yourself, rendered first)
     // on first init. The list is [self, ...direct reports].
     setAssigneeId(currentUser.id);
+    setAssignedById(currentUser.superiorId && currentUser.superiorId !== currentUser.id ? currentUser.superiorId : currentUser.id);
     setTaskDesc('');
     setTaskInstructions('');
     setTaskScope('');
@@ -337,6 +355,7 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
     setTaskProject(currentUser.department || 'Operations');
     setIsCustomProject(false);
     setTaskPriority('Medium');
+    setAssignedDate(new Date().toISOString().split('T')[0]);
     setDeadlineDate(new Date(Date.now() + 86400000 * 7).toISOString().split('T')[0]);
     setIsAssigning(true);
   };
@@ -351,6 +370,7 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
     setEditingTaskId(t.id);
     setTaskTitle(t.title);
     setAssigneeId(t.assignedTo);
+    setAssignedById(t.assignedBy || currentUser.id);
     setTaskDesc(t.description || '');
     setTaskInstructions(t.instructions || '');
     setTaskScope(t.scope || '');
@@ -358,14 +378,15 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
     setTaskProject(t.project || t.department || 'Operations');
     setIsCustomProject(false);
     setTaskPriority(t.priority || 'Medium');
+    setAssignedDate(t.assignedDate || new Date().toISOString().split('T')[0]);
     setDeadlineDate(t.deadline);
     setIsAssigning(true);
   };
 
-  const handleCreateTask = (e: React.FormEvent) => {
+  const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!taskTitle.trim() || !assigneeId || !deadlineDate) {
-      showDialog('Please fill out all required fields (Task title, Assignee, Deadline).');
+    if (!taskTitle.trim() || !assigneeId || !assignedDate || !deadlineDate) {
+      showDialog('Please fill out all required fields (Task title, Assignee, Assign Date, Deadline).');
       return;
     }
 
@@ -391,8 +412,13 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
       project: (taskProject.trim() || assignedUser?.department || 'Operations'),
       priority: taskPriority || 'Medium',
       progress: existingTask?.progress ?? 0,
-      assignedBy: existingTask ? existingTask.assignedBy : currentUser.id,
-      assignedByName: existingTask ? existingTask.assignedByName : currentUser.name,
+      assignedBy: assignedById || currentUser.id,
+      assignedByName: (() => {
+        const sup = allUsers.find(u => u.id === assignedById);
+        if (sup) return sup.name || sup.username;
+        if (assignedById === currentUser.id) return currentUser.name || currentUser.username;
+        return String(assignedById).replace(/^user_/i, '');
+      })(),
       assignedTo: assigneeId,
       assignedToName: assignedUser ? assignedUser.name : currentUser.name,
       department: assignedUser ? assignedUser.department : currentUser.department,
@@ -400,7 +426,7 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
       instructions: taskInstructions.trim(),
       scope: taskScope.trim(),
       qualityCriteria: taskQualityCriteria.trim(),
-      assignedDate: existingTask ? existingTask.assignedDate : new Date().toISOString().split('T')[0],
+      assignedDate: assignedDate || (existingTask ? existingTask.assignedDate : new Date().toISOString().split('T')[0]),
       deadline: deadlineDate,
       status: existingTask ? existingTask.status : 'Pending',
       score: existingTask ? existingTask.score : undefined,
@@ -416,33 +442,55 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
       signature: existingTask?.signature
     };
 
-    // Create/edit of task metadata only — never a submission or a grade. A brand
-    // new task still hits POST /trs (idx === -1) inside saveTRSTask.
-    saveTRSTask(savedTask, currentUser, 'update');
-    setFeedbackMsg(
-      editingTaskId
-        ? `TRS Report "${savedTask.title}" updated successfully!`
-        : isSelfAssignment
-        ? `TRS Report created and assigned to yourself (${taskCode})!`
-        : `TRS Report delegated to ${savedTask.assignedToName} (${taskCode}) successfully!`
-    );
-    setIsAssigning(false);
-    setEditingTaskId(null);
-    setTaskTitle('');
-    setTaskDesc('');
-    setTaskInstructions('');
-    setTaskScope('');
-    setTaskQualityCriteria('');
-    setDeadlineDate('');
-    loadTasks();
-    setActiveTask(savedTask);
-    if (!isSelfAssignment && currentUser.username !== 'admin') {
-      setTrsSubTab('subordinate_tasks');
-      setSubordinateStaffFilter('all');
-      setSubordinateStatusFilter('all');
-      setSubordinateSearchQuery('');
+    const closeForm = () => {
+      setIsAssigning(false);
+      setEditingTaskId(null);
+      setTaskTitle('');
+      setTaskDesc('');
+      setTaskInstructions('');
+      setTaskScope('');
+      setTaskQualityCriteria('');
+      setAssignedDate('');
+      setDeadlineDate('');
+    };
+
+    // A brand-new task has only a temporary local id until POST /trs returns
+    // the real server code. Keep it out of the table (and its sliders) while it
+    // uploads; otherwise the user can adjust progression on an id the backend
+    // does not know yet and get 404 "Task not found."
+    if (!editingTaskId) {
+      setPendingTasks(prev => [...prev, savedTask]);
+      closeForm();
+      try {
+        const created = await createTRSTask(savedTask, currentUser);
+        setPendingTasks(prev => prev.filter(t => t.id !== savedTask.id));
+        loadTasks(created.id);
+        setActiveTask(created);
+        setFeedbackMsg(
+          isSelfAssignment
+            ? `TRS Report created and assigned to yourself (${created.code || taskCode})!`
+            : `TRS Report delegated to ${created.assignedToName || savedTask.assignedToName} (${created.code || taskCode}) successfully!`
+        );
+        if (!isSelfAssignment && currentUser.username !== 'admin') {
+          setTrsSubTab('subordinate_tasks');
+          setSubordinateStaffFilter('all');
+          setSubordinateStatusFilter('all');
+          setSubordinateSearchQuery('');
+        }
+      } catch (err: any) {
+        setPendingTasks(prev => prev.filter(t => t.id !== savedTask.id));
+        setFeedbackMsg(`Could not create TRS report: ${err?.message || 'request failed'}`);
+      }
+      setTimeout(() => setFeedbackMsg(''), 4000);
+      return;
     }
 
+    // Editing existing metadata only — never a submission or a grade.
+    saveTRSTask(savedTask, currentUser, 'update');
+    setFeedbackMsg(`TRS Report "${savedTask.title}" updated successfully!`);
+    closeForm();
+    loadTasks();
+    setActiveTask(savedTask);
     setTimeout(() => setFeedbackMsg(''), 4000);
   };
 
@@ -539,8 +587,13 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
     handleUpdateProgress(task, targetProg);
   };
 
+  const [updatingProgress, setUpdatingProgress] = useState(false);
+  const progressBusyRef = useRef<Set<string>>(new Set());
+  const progressQueueRef = useRef<Map<string, number>>(new Map());
+
   const handleUpdateProgress = async (task: TRSTask, newProgress: number) => {
     const clamped = Math.min(100, Math.max(0, Math.round(newProgress)));
+    if (clamped === (task.progress || 0) && !progressQueueRef.current.has(task.id)) return;
 
     // 100% means "work done, awaiting submission" — NOT Completed. Status flips to
     // Completed only via POST /trs/:code/submit, which refuses to run on a task that
@@ -559,26 +612,60 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
       }
     }
 
-    const updated: TRSTask = {
-      ...task,
-      progress: clamped,
-      status: newStatus,
-      completionDate: compDate
-    };
+    // Optimistic update
+    setActiveTask(prev => prev?.id === task.id ? { ...prev, progress: clamped, status: newStatus, completionDate: compDate } : prev);
+    setTasks(prev => prev.map(t => t.id === task.id ? { ...t, progress: clamped, status: newStatus, completionDate: compDate } : t));
 
+    // Queue the latest value per task. Requests are sent one at a time so a slow,
+    // older save can never overwrite the newest slider position.
+    progressQueueRef.current.set(task.id, clamped);
+    if (progressBusyRef.current.has(task.id)) return;
+
+    progressBusyRef.current.add(task.id);
+    setUpdatingProgress(true);
+    let timeoutId: any;
     try {
-      await updateTRSTaskProgress(task.id, clamped);
+      while (progressQueueRef.current.has(task.id)) {
+        const next = progressQueueRef.current.get(task.id) as number;
+        progressQueueRef.current.delete(task.id);
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error('Request timed out')), 15000);
+        });
+        await Promise.race([updateTRSTaskProgress(task.id, next), timeoutPromise]);
+        if (timeoutId) clearTimeout(timeoutId);
+      }
       await loadTasks(task.id);
-      setActiveTask(updated);
-      setFeedbackMsg(
-        clamped === 100
+      const saved = getVisibleTRSTasksForUser(currentUser).find(t => t.id === task.id);
+      const finalProgress = saved?.progress ?? clamped;
+      showProgressToast(
+        finalProgress === 100
           ? 'Progression reached 100% — submit your deliverable report to finalise.'
-          : `Progression updated to ${clamped}% → Status set to "${newStatus}".`
+          : `Progression updated to ${finalProgress}% — Status set to "${saved?.status || newStatus}".`
       );
     } catch (e: any) {
-      setFeedbackMsg(`Could not update progression: ${e?.message || 'request failed'}`);
+      if (timeoutId) clearTimeout(timeoutId);
+      progressQueueRef.current.delete(task.id);
+      // A 401 is a session problem, not a progression problem. The api layer
+      // already retried once and App shows the global "Session Expired" dialog,
+      // so suppress the misleading "Not authenticated" toast here.
+      if (e?.status !== 401) {
+        showProgressToast(`Could not update progression: ${e?.message || 'request failed'}`, 'error');
+        try {
+          await loadTasks(task.id);
+        } catch {}
+      }
+    } finally {
+      progressBusyRef.current.delete(task.id);
+      const pending = progressQueueRef.current.get(task.id);
+      if (pending !== undefined) {
+        progressQueueRef.current.delete(task.id);
+        if (progressBusyRef.current.size === 0) setUpdatingProgress(false);
+        const latest = getVisibleTRSTasksForUser(currentUser).find(t => t.id === task.id) || task;
+        void handleUpdateProgress(latest, pending);
+      } else if (progressBusyRef.current.size === 0) {
+        setUpdatingProgress(false);
+      }
     }
-    setTimeout(() => setFeedbackMsg(''), 3500);
   };
 
   const handleSaveStaffRemark = () => {
@@ -822,10 +909,22 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
       return;
     }
 
+    // Proof files are only staged until now — send them to S3 on submit.
+    setDeliverableSaving(true);
+    let proofData: MultiProofData;
+    try {
+      proofData = await uploadPendingProofs(taskMultiProof);
+    } catch (err: any) {
+      setDeliverableSaving(false);
+      showDialog(err?.message || 'Proof file upload failed. Please try again.');
+      return;
+    }
+    setTaskMultiProof(proofData);
+
     // Determine primary proofUrl for backwards-compatibility
-    const fallbackProofUrl = taskMultiProof.cloudLinks?.[0]?.url ||
-      taskMultiProof.files?.[0]?.url ||
-      taskMultiProof.telegramLinks?.[0]?.url ||
+    const fallbackProofUrl = proofData.cloudLinks?.[0]?.url ||
+      proofData.files?.[0]?.url ||
+      proofData.telegramLinks?.[0]?.url ||
       proofUrl.trim();
 
     const updated: TRSTask = {
@@ -837,7 +936,7 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
       delayReason: timeliness.isLate ? delayReason.trim() : undefined,
       submissionNotes: deliverableNotes.trim(),
       proofUrl: fallbackProofUrl,
-      multiProof: taskMultiProof,
+      multiProof: proofData,
       submittedAt: nowIso,
       evaluationStatus: undefined, // Pending superior quality evaluation
       score: undefined, // Cleared until superior evaluates!
@@ -856,7 +955,6 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
       }
     };
 
-    setDeliverableSaving(true);
     try {
     setActiveTask(updated);
     await saveTRSTask(updated, currentUser, 'submit');
@@ -925,6 +1023,21 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
 
   return (
     <div className="p-2 space-y-4">
+      {progressToast && (
+        <div
+          role="status"
+          className={`fixed bottom-20 md:bottom-5 right-4 md:right-5 z-[80] max-w-[calc(100vw-2rem)] sm:max-w-md px-4 py-3 rounded-2xl shadow-xl border text-xs font-bold flex items-start gap-2 animate-in slide-in-from-bottom-2 fade-in duration-200 ${
+            progressToast.type === 'success'
+              ? 'bg-emerald-600 text-white border-emerald-500'
+              : 'bg-rose-600 text-white border-rose-500'
+          }`}
+        >
+          {progressToast.type === 'success'
+            ? <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+            : <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />}
+          <span className="leading-relaxed">{progressToast.text}</span>
+        </div>
+      )}
       {/* TRS Scoring Model Policy Banner - Standardized Display Matching T&R Rubric */}
       {feedbackMsg && (
         <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-semibold flex items-center gap-2">
@@ -1135,6 +1248,24 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
               Officer / Direct Subordinate View
             </span>
           </div>
+        </div>
+      )}
+
+      {/* New tasks stay here until the server returns their real code. */}
+      {pendingTasks.length > 0 && (
+        <div className="space-y-2" role="status" aria-live="polite">
+          {pendingTasks.map(t => (
+            <div
+              key={t.id}
+              className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs font-bold text-blue-900"
+            >
+              <Loader2 className="w-4 h-4 animate-spin text-blue-600 shrink-0" />
+              <span className="truncate">{t.title}</span>
+              <span className="ml-auto text-[10px] font-black uppercase tracking-wide text-blue-600 whitespace-nowrap">
+                Uploading…
+              </span>
+            </div>
+          ))}
         </div>
       )}
 
@@ -2126,9 +2257,10 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
                         </p>
                       </div>
                     </div>
-                    <span className={`text-sm font-black ${
+                    <span className={`text-sm font-black flex items-center gap-1 shrink-0 ${
                       (activeTask.progress || 0) === 100 ? 'text-emerald-600' : 'text-blue-600'
                     }`}>
+                      {updatingProgress && <Loader2 className="w-3 h-3 animate-spin" />}
                       {activeTask.progress || 0}%
                     </span>
                   </div>
@@ -2151,42 +2283,32 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
                       <div className="flex items-center justify-between gap-1 flex-wrap">
                         <div className="flex items-center gap-1.5">
                           <span className="text-[11px] font-bold text-slate-700">Quick Select Progression:</span>
-                          <span className="text-[10px] text-slate-400 font-medium">(Syncs status automatically)</span>
                         </div>
                         <div className="flex items-center gap-1.5 flex-wrap">
                           {[0, 25, 50, 75, 90, 100].map(pct => (
-                            <button
-                              key={pct}
-                              type="button"
-                              onClick={() => handleUpdateProgress(activeTask, pct)}
-                              className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                                (activeTask.progress || 0) === pct
-                                  ? pct === 100
-                                    ? 'bg-emerald-600 text-white shadow-xs scale-105 ring-2 ring-emerald-300'
-                                    : pct === 0
-                                    ? 'bg-slate-700 text-white shadow-xs scale-105 ring-2 ring-slate-300'
-                                    : 'bg-blue-600 text-white shadow-xs scale-105 ring-2 ring-blue-300'
-                                  : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-300'
-                              }`}
+                          <button
+                            key={pct}
+                            type="button"
+                            disabled={updatingProgress}
+                            onClick={() => handleUpdateProgress(activeTask, pct)}
+                            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 ${
+                              (activeTask.progress || 0) === pct
+                                ? pct === 100
+                                  ? 'bg-emerald-600 text-white shadow-xs scale-105 ring-2 ring-emerald-300'
+                                  : pct === 0
+                                  ? 'bg-slate-700 text-white shadow-xs scale-105 ring-2 ring-slate-300'
+                                  : 'bg-blue-600 text-white shadow-xs scale-105 ring-2 ring-blue-300'
+                                : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-300'
+                            }`}
                             >
+                              {updatingProgress && (activeTask.progress || 0) === pct && <Loader2 className="w-3 h-3 animate-spin" />}
                               {pct}%{pct === 100 ? ' • Completed' : pct === 0 ? ' • Pending' : ''}
                             </button>
                           ))}
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-3">
-                        <span className="text-[11px] text-slate-500 shrink-0 font-medium">Fine adjustment:</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          step={5}
-                          value={activeTask.progress || 0}
-                          onChange={e => handleUpdateProgress(activeTask, Number(e.target.value))}
-                          className="w-full accent-blue-600 cursor-pointer h-2 bg-slate-200 rounded-lg"
-                        />
-                      </div>
+
 
                       {(activeTask.progress || 0) < 100 ? (
                         <div className="p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-900 flex items-center gap-2">
@@ -2667,19 +2789,44 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
                   )}
 
                   {/* Proof Link if available */}
-                  {activeTask.proofUrl && (
-                    <div className="flex items-center gap-2 pt-1">
-                      <span className="text-[11px] font-bold text-slate-700">Deliverable Proof:</span>
-                      <a
-                        href={activeTask.proofUrl.startsWith('http') ? activeTask.proofUrl : `https://${activeTask.proofUrl}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs font-bold text-blue-600 hover:underline flex items-center gap-1 bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5 text-blue-500" /> View Deliverable File / Proof
-                      </a>
-                    </div>
-                  )}
+                  {activeTask.proofUrl && (() => {
+                    const base = typeof window !== 'undefined' ? window.location.origin : '';
+                    const getUrl = (u: string) => {
+                      if (!u) return '#';
+                      if (u.includes('reportupload/')) {
+                        const name = u.split('reportupload/').pop();
+                        return `${base}/reportupload/${name}`;
+                      }
+                      if (u.startsWith('/reportupload/')) return `${base}${u}`;
+                      if (u.startsWith('/')) return `${base}${u}`;
+                      if (u.startsWith('http://') || u.startsWith('https://')) {
+                        try {
+                          const urlObj = new URL(u);
+                          if (urlObj.pathname.includes('reportupload/')) {
+                            const name = urlObj.pathname.split('reportupload/').pop();
+                            return `${base}/reportupload/${name}`;
+                          }
+                          return u;
+                        } catch {
+                          return `${base}/reportupload/${u.split('/').pop()}`;
+                        }
+                      }
+                      return `${base}/reportupload/${u.split('/').pop()}`;
+                    };
+                    return (
+                      <div className="flex items-center gap-2 pt-1">
+                        <span className="text-[11px] font-bold text-slate-700">Deliverable Proof:</span>
+                        <a
+                          href={getUrl(activeTask.proofUrl)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs font-bold text-blue-600 hover:underline flex items-center gap-1 bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5 text-blue-500" /> View Deliverable File / Proof
+                        </a>
+                      </div>
+                    );
+                  })()}
 
                   {/* Multi Proof Deliverables Record (locked / read-only) */}
                   {(activeTask.multiProof?.files?.length || activeTask.multiProof?.cloudLinks?.length || activeTask.multiProof?.telegramLinks?.length) ? (
@@ -3014,7 +3161,7 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
         </div>
       )}
 
-      {/* Superior TRS Report Evaluation & Review Modal (2-Factor Scoring Model: Timeliness 40% + Quality 60%) */}
+          {/* Superior TRS Report Evaluation & Review Modal (2-Factor Scoring Model: Timeliness 40% + Quality 60%) */}
       {isReviewingModal && activeTask && (
         <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full p-6 border border-slate-200 space-y-4 max-h-[94vh] overflow-y-auto my-4">
@@ -3347,7 +3494,7 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-800 mb-1">
-                    Assign to Staff Member *
+                    Assign To: *
                   </label>
                   <ModernSelect
                     required
@@ -3366,6 +3513,38 @@ export const TRSReportView: React.FC<TRSReportViewProps> = ({ currentUser }) => 
                   </ModernSelect>
                 </div>
 
+              <div>
+                <label className="block text-xs font-bold text-slate-800 mb-1">Assigned By: *</label>
+                <select
+                  value={assignedById}
+                  onChange={(e) => setAssignedById(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs bg-white text-slate-900 font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                >
+                  <option value={currentUser.id}>{currentUser.name || currentUser.username}</option>
+                  {currentUser.superiorId && currentUser.superiorId !== currentUser.id && (
+                    (() => {
+                      const sup = allUsers.find(u => u.id === currentUser.superiorId);
+                      if (sup) {
+                        return <option value={currentUser.superiorId}>{sup.name || sup.username || currentUser.superiorId}</option>;
+                      }
+                      return <option value={currentUser.superiorId}>{String(currentUser.superiorId).replace(/^user_/i, '')}</option>;
+                    })()
+                  )}
+                </select>
+              </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-800 mb-1">Assign Date *</label>
+                  <input
+                    type="date"
+                    required
+                    value={assignedDate}
+                    onChange={e => setAssignedDate(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs text-slate-900 bg-white font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-800 mb-1">Completion Deadline *</label>
                   <input

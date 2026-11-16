@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { User, WeeklyReport, RoleTemplate, SubmittedChecklistItem, SignatureData, ChecklistItemStatus, ChecklistFrequency, MultiProofData, hasUserPermission } from '../types';
+import { User, WeeklyReport, RoleTemplate, SubmittedChecklistItem, SignatureData, ChecklistItemStatus, ChecklistFrequency, MultiProofData, hasUserPermission, TeamSummaryRecord } from '../types';
 import {
   isAnytime,
   isMonthlyCycle,
@@ -52,13 +52,15 @@ import {
   resolveScoreDispute,
   requestTRExtension,
   reviewTRExtension,
-  calculateWorkingDaysElapsed
+  calculateWorkingDaysElapsed,
+  refreshReports
 } from '../services/storage';
 import { getDaysDifferenceFromToday } from '../services/deadlineAlertService';
 import { SignatureCanvas, SignatureCanvasHandle } from './SignatureCanvas';
-import { MultiProofUploader } from './MultiProofUploader';
+import { MultiProofUploader, uploadPendingProofs, stripPendingProofs } from './MultiProofUploader';
 import {
   CheckSquare,
+  Check,
   Sparkles,
   Calendar,
   CheckCircle2,
@@ -90,15 +92,25 @@ import {
   HelpCircle,
   Loader2,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  History
 } from 'lucide-react';
 import { ModernSelect } from './ModernSelect';
+import { WeeklySummaryForm, EMPTY_SUMMARY, validateWeeklySummary, stripEmptyEntries } from './WeeklySummaryForm';
+import { WeeklySummary } from '../types';
+import { saveWeeklySummary, fetchWeeklySummary } from '../services/storage';
+import { api } from '../services/api';
+
+const TR_WEEK_OPTIONS = Array.from({ length: 53 }, (_, i) => i + 1);
+const TEAM_SUMMARY_PAGE_SIZE = 20;
 
 interface TRReportViewProps {
   currentUser: User;
   pageMode?: 'new' | 'edit';
   initialEditId?: string;
   onExit?: () => void;
+  /** True while the T&R tab is the visible one. Drives the on-activation refresh. */
+  isActive?: boolean;
 }
 
 interface PillarCell {
@@ -154,7 +166,7 @@ const PillarBreakdown: React.FC<{ cells: PillarCell[] }> = ({ cells }) => (
   </div>
 );
 
-export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMode, initialEditId, onExit }) => {
+export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMode, initialEditId, onExit, isActive = true }) => {
   const pageModeRef = useRef(pageMode);
   pageModeRef.current = pageMode;
   const skipNextAutosaveRef = useRef(false);
@@ -227,11 +239,44 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
   // Form states for report submission
   const [checklistState, setChecklistState] = useState<SubmittedChecklistItem[]>([]);
   const [reportNotes, setReportNotes] = useState('');
+  // Weekly Summary Form (IRG-HR-FRM-WSUM-001 v1.1, Sections A-J)
+  const [weeklySummary, setWeeklySummary] = useState<WeeklySummary>(EMPTY_SUMMARY);
+  // Read-only copy rendered in the report detail view (superior review screen).
+  const [viewSummary, setViewSummary] = useState<WeeklySummary | null>(null);
+  // Guards the async summary fetch against a stale response overwriting a newer pick.
+  const summaryReqRef = useRef('');
   const [signature, setSignature] = useState<SignatureData | undefined>(undefined);
   const signatureCanvasRef = useRef<SignatureCanvasHandle>(null);
   const periodSectionRef = useRef<HTMLDivElement>(null);
   const [aiSummaryText, setAiSummaryText] = useState('');
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+
+  // Chat-style consolidated summaries for selected subordinate reports.
+  const [selectedSubReportIds, setSelectedSubReportIds] = useState<Set<string>>(new Set());
+  const [isTeamSummaryOpen, setIsTeamSummaryOpen] = useState(false);
+  const [teamSummaryHistory, setTeamSummaryHistory] = useState<TeamSummaryRecord[]>([]);
+  const [isLoadingTeamSummaryHistory, setIsLoadingTeamSummaryHistory] = useState(false);
+  const [isGeneratingTeamSummary, setIsGeneratingTeamSummary] = useState(false);
+  const [teamSummaryError, setTeamSummaryError] = useState('');
+  const [pendingSummaryReports, setPendingSummaryReports] = useState<WeeklyReport[]>([]);
+  const [copiedSummaryCode, setCopiedSummaryCode] = useState<string | null>(null);
+  const [summaryHistorySearch, setSummaryHistorySearch] = useState('');
+  const [summaryHistoryFrom, setSummaryHistoryFrom] = useState('');
+  const [summaryHistoryTo, setSummaryHistoryTo] = useState('');
+  const [teamSummaryTotal, setTeamSummaryTotal] = useState(0);
+  const [teamSummaryHasMore, setTeamSummaryHasMore] = useState(false);
+  const [isLoadingMoreTeamSummaries, setIsLoadingMoreTeamSummaries] = useState(false);
+  const [deletingSummaryCode, setDeletingSummaryCode] = useState<string | null>(null);
+  const teamSummaryScrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isTeamSummaryOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsTeamSummaryOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isTeamSummaryOpen]);
   const [feedbackMsg, setFeedbackMsg] = useState('');
   const [delayReason, setDelayReason] = useState('');
   const [multiProof, setMultiProof] = useState<MultiProofData>({ files: [], cloudLinks: [], telegramLinks: [] });
@@ -300,10 +345,19 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
   const [conflictHighlight, setConflictHighlight] = useState(false);
   const [isSubmittingReport, setIsSubmittingReport] = useState(false);
   const [isSavingDraft, setIsSavingDraft] = useState(false);
+  // Live proof-file upload status shown in the fixed bottom overlay while a
+  // submit/save is pushing files to S3 (null = nothing in flight).
+  const [submitStatus, setSubmitStatus] = useState<{
+    label: string;
+    detail?: string;
+    percent: number;
+  } | null>(null);
 
   // Subordinate Staff Filtering States (for Superiors with many staff)
   const [subordinateStaffFilter, setSubordinateStaffFilter] = useState<string>('all');
   const [subordinateStatusFilter, setSubordinateStatusFilter] = useState<string>('all');
+  const [subordinateWeekFilter, setSubordinateWeekFilter] = useState<string>('all');
+  const [subordinateYearFilter, setSubordinateYearFilter] = useState<string>('all');
   const [subordinateSearchQuery, setSubordinateSearchQuery] = useState<string>('');
   const [showRubric, setShowRubric] = useState<boolean>(true);
   const [showDeadlineDetails, setShowDeadlineDetails] = useState<boolean>(false);
@@ -341,10 +395,295 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
     () => reports.filter(r => directSubIds.has(r.staffId)),
     [reports, directSubIds]
   );
+  const subordinateYearOptions = useMemo(() => {
+    const years = new Set<number>();
+    subordinateVisibleReports.forEach(r => years.add(r.year));
+    years.add(new Date().getFullYear());
+    return Array.from(years).sort((a, b) => b - a);
+  }, [subordinateVisibleReports]);
+  const subordinateFilteredReports = useMemo(() => {
+    let filtered = subordinateVisibleReports;
+    if (subordinateStaffFilter !== 'all') {
+      filtered = filtered.filter(r => r.staffId === subordinateStaffFilter);
+    }
+    if (subordinateStatusFilter !== 'all') {
+      filtered = filtered.filter(r => (r.status || 'Submitted') === subordinateStatusFilter);
+    }
+    if (subordinateYearFilter !== 'all') {
+      filtered = filtered.filter(r => r.year === Number(subordinateYearFilter));
+    }
+    if (subordinateWeekFilter !== 'all') {
+      filtered = filtered.filter(r => r.weekNumber === Number(subordinateWeekFilter));
+    }
+    if (subordinateSearchQuery.trim()) {
+      const q = subordinateSearchQuery.toLowerCase();
+      filtered = filtered.filter(r =>
+        r.staffName.toLowerCase().includes(q) ||
+        r.position.toLowerCase().includes(q) ||
+        `w${r.weekNumber}`.includes(q) ||
+        `week ${r.weekNumber}`.includes(q) ||
+        r.year.toString().includes(q)
+      );
+    }
+    return filtered;
+  }, [subordinateVisibleReports, subordinateStaffFilter, subordinateStatusFilter, subordinateWeekFilter, subordinateYearFilter, subordinateSearchQuery]);
+  const visibleSubReportIds = useMemo(
+    () => subordinateFilteredReports.map(r => r.id),
+    [subordinateFilteredReports]
+  );
+  const allVisibleSubReportsSelected =
+    visibleSubReportIds.length > 0 && visibleSubReportIds.every(id => selectedSubReportIds.has(id));
+  const selectedSubReportCount = selectedSubReportIds.size;
+
+  useEffect(() => {
+    if (trSubTab !== 'subordinate_reports') {
+      setSelectedSubReportIds(prev => (prev.size ? new Set() : prev));
+      return;
+    }
+    const valid = new Set(subordinateVisibleReports.map(r => r.id));
+    setSelectedSubReportIds(prev => {
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach(id => {
+        if (valid.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [trSubTab, subordinateVisibleReports]);
+
+  const toggleSubReportSelection = (reportId: string) => {
+    setSelectedSubReportIds(prev => {
+      const next = new Set(prev);
+      if (next.has(reportId)) next.delete(reportId);
+      else next.add(reportId);
+      return next;
+    });
+  };
+
+  const toggleSelectAllVisibleSubReports = () => {
+    setSelectedSubReportIds(prev => {
+      const next = new Set(prev);
+      if (allVisibleSubReportsSelected) {
+        visibleSubReportIds.forEach(id => next.delete(id));
+      } else {
+        visibleSubReportIds.forEach(id => next.add(id));
+      }
+      return next;
+    });
+  };
+
+  const scrollTeamSummaryToBottom = () => {
+    setTimeout(() => {
+      const el = teamSummaryScrollRef.current;
+      if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    }, 60);
+  };
+
+  const fetchTeamSummaryHistory = async (opts: {
+    append?: boolean;
+    filters?: { search?: string; from?: string; to?: string };
+  } = {}) => {
+    const append = !!opts.append;
+    const search = opts.filters?.search ?? summaryHistorySearch;
+    const from = opts.filters?.from ?? summaryHistoryFrom;
+    const to = opts.filters?.to ?? summaryHistoryTo;
+    const params = new URLSearchParams();
+    params.set('limit', String(TEAM_SUMMARY_PAGE_SIZE));
+    if (append) {
+      const oldest = teamSummaryHistory[teamSummaryHistory.length - 1];
+      if (oldest?.id) params.set('beforeId', String(oldest.id));
+    }
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    if (search.trim()) params.set('q', search.trim());
+    const res = await api.get<{
+      summaries: TeamSummaryRecord[];
+      total: number;
+      hasMore: boolean;
+    }>(`/ai/team-summaries?${params.toString()}`);
+    const list = Array.isArray(res?.summaries) ? res.summaries : [];
+    setTeamSummaryHistory(prev => {
+      if (!append) return list;
+      const seen = new Set(prev.map(s => s.code));
+      return [...prev, ...list.filter(s => !seen.has(s.code))];
+    });
+    setTeamSummaryTotal(Number(res?.total) || 0);
+    setTeamSummaryHasMore(!!res?.hasMore);
+  };
+
+  const openTeamSummaryHistory = async () => {
+    setIsTeamSummaryOpen(true);
+    setTeamSummaryError('');
+    setIsLoadingTeamSummaryHistory(true);
+    try {
+      await fetchTeamSummaryHistory();
+      scrollTeamSummaryToBottom();
+    } catch (e: any) {
+      setTeamSummaryError(e?.message || 'Could not load summary history.');
+    } finally {
+      setIsLoadingTeamSummaryHistory(false);
+    }
+  };
+
+  const applyTeamSummaryFilters = async (filters?: { search?: string; from?: string; to?: string }) => {
+    if (filters?.search !== undefined) setSummaryHistorySearch(filters.search);
+    if (filters?.from !== undefined) setSummaryHistoryFrom(filters.from);
+    if (filters?.to !== undefined) setSummaryHistoryTo(filters.to);
+    setIsLoadingTeamSummaryHistory(true);
+    setTeamSummaryError('');
+    try {
+      await fetchTeamSummaryHistory({ filters });
+      scrollTeamSummaryToBottom();
+    } catch (e: any) {
+      setTeamSummaryError(e?.message || 'Could not load summary history.');
+    } finally {
+      setIsLoadingTeamSummaryHistory(false);
+    }
+  };
+
+  const applyTeamSummaryDatePreset = (preset: 'all' | '7d' | '30d' | 'month') => {
+    let from = '';
+    let to = '';
+    if (preset === '7d' || preset === '30d') {
+      const days = preset === '7d' ? 7 : 30;
+      const start = new Date();
+      start.setDate(start.getDate() - (days - 1));
+      from = formatISODate(start);
+      to = formatISODate(new Date());
+    } else if (preset === 'month') {
+      const now = new Date();
+      from = formatISODate(new Date(now.getFullYear(), now.getMonth(), 1));
+      to = formatISODate(now);
+    }
+    setSummaryHistoryFrom(from);
+    setSummaryHistoryTo(to);
+    void applyTeamSummaryFilters({ from, to });
+  };
+
+  const clearTeamSummaryFilters = () => {
+    setSummaryHistorySearch('');
+    setSummaryHistoryFrom('');
+    setSummaryHistoryTo('');
+    void applyTeamSummaryFilters({ search: '', from: '', to: '' });
+  };
+
+  const handleLoadMoreTeamSummaries = async () => {
+    const el = teamSummaryScrollRef.current;
+    const previousHeight = el?.scrollHeight || 0;
+    const previousTop = el?.scrollTop || 0;
+    setIsLoadingMoreTeamSummaries(true);
+    setTeamSummaryError('');
+    try {
+      await fetchTeamSummaryHistory({ append: true });
+      setTimeout(() => {
+        if (!el) return;
+        el.scrollTop = el.scrollHeight - previousHeight + previousTop;
+      }, 60);
+    } catch (e: any) {
+      setTeamSummaryError(e?.message || 'Could not load older summaries.');
+    } finally {
+      setIsLoadingMoreTeamSummaries(false);
+    }
+  };
+
+  const handleGenerateTeamSummary = async () => {
+    const selectedReports = reports.filter(r => selectedSubReportIds.has(r.id));
+    if (selectedReports.length === 0) return;
+    if (selectedReports.length > 20) {
+      setTeamSummaryError('Select no more than 20 reports at a time.');
+      return;
+    }
+    setIsTeamSummaryOpen(true);
+    setTeamSummaryError('');
+    setPendingSummaryReports(selectedReports);
+    setIsGeneratingTeamSummary(true);
+    setIsLoadingTeamSummaryHistory(true);
+    try {
+      try {
+        await fetchTeamSummaryHistory();
+      } catch {
+      }
+      const res = await api.post<{ summary: TeamSummaryRecord }>('/ai/team-summaries', {
+        reportCodes: selectedReports.map(r => r.id)
+      });
+      if (res?.summary) {
+        setTeamSummaryHistory(prev => [res.summary, ...prev.filter(s => s.code !== res.summary.code)]);
+        setTeamSummaryTotal(prev => prev + 1);
+        setSelectedSubReportIds(new Set());
+      }
+      scrollTeamSummaryToBottom();
+    } catch (e: any) {
+      setTeamSummaryError(e?.message || 'Could not generate the summary.');
+    } finally {
+      setIsGeneratingTeamSummary(false);
+      setIsLoadingTeamSummaryHistory(false);
+      setPendingSummaryReports([]);
+    }
+  };
+
+  const handleDeleteTeamSummary = async (record: TeamSummaryRecord) => {
+    const confirmed = await confirmDialog(
+      'Delete this saved summary? This cannot be undone.',
+      { title: 'Delete Summary', confirmText: 'Delete' }
+    );
+    if (!confirmed) return;
+    setDeletingSummaryCode(record.code);
+    setTeamSummaryError('');
+    try {
+      await api.del(`/ai/team-summaries/${encodeURIComponent(record.code)}`);
+      setTeamSummaryHistory(prev => prev.filter(s => s.code !== record.code));
+      setTeamSummaryTotal(prev => Math.max(0, prev - 1));
+      if (teamSummaryHistory.length <= 1 && teamSummaryHasMore) {
+        await fetchTeamSummaryHistory();
+      }
+    } catch (e: any) {
+      setTeamSummaryError(e?.message || 'Could not delete the summary.');
+    } finally {
+      setDeletingSummaryCode(null);
+    }
+  };
+
+  const handleCopyTeamSummary = async (record: TeamSummaryRecord) => {
+    try {
+      await navigator.clipboard.writeText(record.summaryText || '');
+      setCopiedSummaryCode(record.code);
+      setTimeout(() => {
+        setCopiedSummaryCode(prev => (prev === record.code ? null : prev));
+      }, 2000);
+    } catch {
+    }
+  };
+
   const subordinatePendingCount = useMemo(
-    () => subordinateVisibleReports.filter(r => r.status === 'Submitted').length,
+    () => subordinateVisibleReports.filter((r) => r.status === 'Submitted').length,
     [subordinateVisibleReports]
   );
+
+  // The T&R tab stays MOUNTED (just hidden) while other tabs are shown, so
+  // switching back never remounts this view and nothing refetches — users were
+  // seeing stale/missing rows and had to hard-refresh. Re-pull the report list
+  // every time the tab is re-activated.
+  const hadActiveRef = useRef(false);
+  useEffect(() => {
+    if (!isActive) {
+      hadActiveRef.current = false;
+      return;
+    }
+    const returningToTab = hadActiveRef.current;
+    hadActiveRef.current = true;
+
+    // First activation right after boot is already covered by the initial
+    // hydration — only force a refetch then if the list came back empty.
+    if (!returningToTab && getVisibleReportsForUser(currentUser).length > 0) return;
+
+    let alive = true;
+    (async () => {
+      await refreshReports();
+      if (alive) loadData();
+    })();
+    return () => { alive = false; };
+  }, [isActive]);
 
   useEffect(() => {
     if (pageModeRef.current) return;
@@ -387,6 +726,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
     if (existingDraft && existingDraft.checklistItems && existingDraft.checklistItems.length > 0 && !draftIsStale) {
       setChecklistState(existingDraft.checklistItems);
       setReportNotes(existingDraft.notes || '');
+      setWeeklySummary({ ...EMPTY_SUMMARY, ...(existingDraft.summary || {}) });
       setMultiProof(existingDraft.multiProof || { files: [], cloudLinks: [], telegramLinks: [] });
       setSignature(existingDraft.signature);
       setLastDraftTime(existingDraft.lastSavedAt ? new Date(existingDraft.lastSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Restored');
@@ -411,6 +751,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
 
       setChecklistState(defaultItems);
       setReportNotes('');
+      setWeeklySummary(EMPTY_SUMMARY);
       setDelayReason('');
       setMultiProof({ files: [], cloudLinks: [], telegramLinks: [] });
       setSignature(undefined);
@@ -519,6 +860,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
 
     setLastDraftTime(null);
     setReportNotes('');
+    setWeeklySummary(EMPTY_SUMMARY);
     setDelayReason('');
     setMultiProof({ files: [], cloudLinks: [], telegramLinks: [] });
     setSignature(undefined);
@@ -568,13 +910,16 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
       saveTRDraft(currentUser.id, selectedYear, selectedWeek, {
         checklistItems: checklistState,
         notes: reportNotes,
+        summary: weeklySummary,
         signature,
-        multiProof
+        // Pending (not yet uploaded) files stay in state only — their base64
+        // payload is never persisted in the autosaved draft.
+        multiProof: stripPendingProofs(multiProof)
       });
       setLastDraftTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     }, 600);
     return () => clearTimeout(timer);
-  }, [checklistState, reportNotes, signature, multiProof, isCreating, editingReportId, selectedWeek, selectedYear, currentUser.id]);
+  }, [checklistState, reportNotes, weeklySummary, signature, multiProof, isCreating, editingReportId, selectedWeek, selectedYear, currentUser.id]);
 
   // Score Dispute Handlers
   const handleOpenDispute = (rep: WeeklyReport) => {
@@ -641,6 +986,28 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
     }
   };
 
+  // Load the Weekly Summary Form (own table) for an existing report.
+  const loadWeeklySummary = async (reportCode: string) => {
+    summaryReqRef.current = reportCode;
+    const s = await fetchWeeklySummary(reportCode);
+    if (s && summaryReqRef.current === reportCode) {
+      setWeeklySummary({ ...EMPTY_SUMMARY, ...s });
+    }
+  };
+
+  // Detail view (superior review screen): show the summary read-only.
+  useEffect(() => {
+    if (isCreating || !activeReport?.id) {
+      setViewSummary(null);
+      return;
+    }
+    let alive = true;
+    fetchWeeklySummary(activeReport.id).then((s) => {
+      if (alive) setViewSummary(s);
+    });
+    return () => { alive = false; };
+  }, [activeReport?.id, isCreating]);
+
   // Handle editing an existing report (Staff editing own report OR Superior editing subordinate report)
   const handleEditReport = (rep: WeeklyReport) => {
     setEditingReportId(rep.id);
@@ -658,6 +1025,9 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
         : []
     );
     setReportNotes(rep.notes || '');
+    setWeeklySummary(rep.summary ? { ...EMPTY_SUMMARY, ...rep.summary } : EMPTY_SUMMARY);
+    // Summary lives in its own table — always fetch it for the report being edited.
+    loadWeeklySummary(rep.id);
     setDelayReason(rep.delayReason || '');
     setSignature(rep.signature);
     setAiSummaryText(rep.aiSummary || '');
@@ -1020,7 +1390,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
   };
 
   // Toggle item status:
-  // For 'Weekly'  items: toggles strictly between 'completed' and 'incomplete' (N/A is never allowed)
+  // For 'Weekly'  items: can be completed, incomplete, or marked N/A when not applicable
   // For 'Monthly' items: can set 'completed', 'incomplete', or 'na' (unless claimed by another week, or N/A-locked on the Month's final week)
   // For 'Yearly'  items: same as Monthly, but the cycle is a year — 1 claim per annual cycle, N/A locked in the cycle's final month (January)
   // For 'Anytime' items: can ALWAYS set 'na', in any week, with no month-end lock
@@ -1062,11 +1432,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
     }
 
     if (newStatus === 'na') {
-      // Strict guard 1: Weekly tasks cannot be marked N/A
-      if (item.category === 'Weekly') {
-        return;
-      }
-      // Strict guard 2: Anytime tasks are ALWAYS allowed to be marked N/A.
+      // Anytime tasks are ALWAYS allowed to be marked N/A.
       //              (no final-week block, no month-end lock)
       if (isAnytimeItem) {
         // fall through and apply
@@ -1444,9 +1810,43 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
       return;
     }
 
+    // Weekly Summary Form (spec §6): drop empty entries, then validate required fields.
+    const cleanSummary = stripEmptyEntries(weeklySummary);
+    setWeeklySummary(cleanSummary);
+    const summaryErrs = validateWeeklySummary(
+      cleanSummary,
+      startDateInput || getWeekDateRange(selectedWeek, selectedYear).startDate,
+      endDateInput || getWeekDateRange(selectedWeek, selectedYear).endDate
+    );
+    if (summaryErrs.length) {
+      showDialog(
+        'Weekly Summary Form — please fix the following:\n\n• ' + summaryErrs.join('\n• ')
+      );
+      return;
+    }
+
     if (isSubmittingReport) return;
     setIsSubmittingReport(true);
     try {
+    // Proof files are only staged until now — send them to S3 on submit.
+    const pendingProofs = (multiProof.files || []).filter((f) => !f.url && f.pendingDataUrl);
+    if (pendingProofs.length > 0) {
+      setSubmitStatus({
+        label: `Uploading file 1 of ${pendingProofs.length}`,
+        detail: pendingProofs[0].name,
+        percent: 0
+      });
+    }
+    const proofData = await uploadPendingProofs(multiProof, (s) =>
+      setSubmitStatus({
+        label: `Uploading file ${s.index + 1} of ${s.total}`,
+        detail: s.name,
+        // The file batch owns 0-90% so the bar keeps moving during the save below.
+        percent: Math.round(((s.index + s.percent / 100) / s.total) * 90)
+      })
+    );
+    setSubmitStatus({ label: 'Saving report…', percent: 95 });
+    setMultiProof(proofData);
     const computedWeekInfo = startDateInput
       ? getWeekNumberFromDate(startDateInput)
       : { weekNumber: selectedWeek, year: selectedYear, quarter: selectedQuarter };
@@ -1503,6 +1903,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
       qualityScore: repQualityScore,
       signature: finalSignature,
       notes: reportNotes,
+      summary: cleanSummary,
       delayReason: delayReason.trim() || ((computedTimeliness.daysDiff > 7 && !existingReport?.approvedDeadline) ? `Retroactive / Backfill: Recording operational accomplishments for Week ${computedWeekInfo.weekNumber}, ${computedWeekInfo.year}.` : undefined),
       approvedDeadline: existingReport?.approvedDeadline,
       extensionRequest: existingReport?.extensionRequest,
@@ -1510,7 +1911,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
       latePenaltyWaived: existingReport?.latePenaltyWaived || existingReport?.extensionRequest?.status === 'Approved' || false,
       waivedBy: existingReport?.waivedBy,
       waivedByName: existingReport?.waivedByName,
-      multiProof,
+      multiProof: proofData,
       aiSummary: aiSummaryText,
       status: (existingReport?.status === 'Approved' || existingReport?.status === 'Reviewed')
         ? existingReport.status
@@ -1527,6 +1928,17 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
       }
       showDialog(saveResult.message || 'Failed to save the report. Please try again.');
       return;
+    }
+
+    // Persist the Weekly Summary Form in its own table (never columns on `reports`).
+    if (saveResult?.code) {
+      const sumRes = await saveWeeklySummary(saveResult.code, cleanSummary);
+      if (!sumRes.ok) {
+        showDialog(
+          'The report was saved, but the Weekly Summary Form could not be saved — ' +
+            (sumRes.message || 'please try again.')
+        );
+      }
     }
 
     clearTRDraft(reportStaffId, computedWeekInfo.year, computedWeekInfo.weekNumber).catch(() => {});
@@ -1546,6 +1958,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
       showDialog(err?.message || 'Failed to save the report. Please try again.');
     } finally {
       setIsSubmittingReport(false);
+      setSubmitStatus(null);
     }
   };
 
@@ -1561,6 +1974,24 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
     if (isSavingDraft || isSubmittingReport) return;
     setIsSavingDraft(true);
     try {
+    // Staged proof files are sent to S3 here too, so a draft never carries base64.
+    const pendingProofs = (multiProof.files || []).filter((f) => !f.url && f.pendingDataUrl);
+    if (pendingProofs.length > 0) {
+      setSubmitStatus({
+        label: `Uploading file 1 of ${pendingProofs.length}`,
+        detail: pendingProofs[0].name,
+        percent: 0
+      });
+    }
+    const proofData = await uploadPendingProofs(multiProof, (s) =>
+      setSubmitStatus({
+        label: `Uploading file ${s.index + 1} of ${s.total}`,
+        detail: s.name,
+        percent: Math.round(((s.index + s.percent / 100) / s.total) * 90)
+      })
+    );
+    setSubmitStatus({ label: 'Saving draft…', percent: 95 });
+    setMultiProof(proofData);
     const computedWeekInfo = startDateInput
       ? getWeekNumberFromDate(startDateInput)
       : { weekNumber: selectedWeek, year: selectedYear, quarter: selectedQuarter };
@@ -1597,6 +2028,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
       qualityScore: existingReport?.qualityScore,
       signature: signature,
       notes: reportNotes,
+      summary: weeklySummary,
       delayReason: delayReason.trim() || undefined,
       approvedDeadline: existingReport?.approvedDeadline,
       extensionRequest: existingReport?.extensionRequest,
@@ -1604,7 +2036,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
       latePenaltyWaived: existingReport?.latePenaltyWaived || existingReport?.extensionRequest?.status === 'Approved' || false,
       waivedBy: existingReport?.waivedBy,
       waivedByName: existingReport?.waivedByName,
-      multiProof,
+      multiProof: proofData,
       aiSummary: aiSummaryText,
       status: 'Draft'
     };
@@ -1619,6 +2051,17 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
       }
       showDialog(saveResult.message || 'Failed to save the draft. Please try again.');
       return;
+    }
+
+    // Drafts persist the summary too (unvalidated / unstripped).
+    if (saveResult?.code) {
+      const sumRes = await saveWeeklySummary(saveResult.code, weeklySummary);
+      if (!sumRes.ok) {
+        showDialog(
+          'The draft was saved, but the Weekly Summary Form could not be saved — ' +
+            (sumRes.message || 'please try again.')
+        );
+      }
     }
 
     clearTRDraft(reportStaffId, computedWeekInfo.year, computedWeekInfo.weekNumber).catch(() => {});
@@ -1638,6 +2081,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
       showDialog(err?.message || 'Failed to save the draft. Please try again.');
     } finally {
       setIsSavingDraft(false);
+      setSubmitStatus(null);
     }
   };
 
@@ -1857,32 +2301,100 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
     }
   };
 
-  // Call Server-Side Gemini API for AI Weekly Executive Summary
+  // Pull a human-readable reason out of any AI-error payload shape.
+  function extractAiError(data: any): string | null {
+    if (!data || typeof data !== 'object') return null;
+    if (typeof data.message === 'string' && data.message.trim()) return data.message;
+    if (typeof data.error?.message === 'string' && data.error.message.trim()) return data.error.message;
+    if (typeof data.error === 'string' && data.error.trim()) {
+      // The frontend server stringified the Gemini error a second time:
+      // '{"error":{"code":400,"message":"API key not valid..."}}'
+      try {
+        const inner = JSON.parse(data.error);
+        const msg = inner?.error?.message || inner?.message;
+        if (typeof msg === 'string' && msg.trim()) return msg;
+      } catch {
+        /* not JSON — use the raw string */
+      }
+      return data.error;
+    }
+    return null;
+  }
+
+  // Assemble the report context the backend AI endpoint summarises.
+  function buildAiSummaryText(): string {
+    const items = isCreating ? checklistState : activeReport?.checklistItems || [];
+    const notes = isCreating ? reportNotes : activeReport?.notes || '';
+    const lines = items.map((it) => {
+      const status = it.status || (it.completed ? 'Done' : 'Incomplete');
+      const note = it.note ? ` — ${it.note}` : '';
+      return `- ${it.title}${it.category ? ` (${it.category})` : ''}: ${status}${note}`;
+    });
+    return [
+      `Staff: ${currentUser.name}`,
+      `Position: ${currentUser.position}`,
+      `Department: ${currentUser.department}`,
+      `Period: Week ${selectedWeek}, ${selectedYear}`,
+      '',
+      'T&R (JD Checklist Items Submitted):',
+      lines.length ? lines.join('\n') : '(none)',
+      '',
+      `Staff notes: "${notes || 'None provided'}"`
+    ].join('\n');
+  }
+
+  // Call the backend Gemini endpoint for the AI Weekly Executive Summary.
+  //
+  // Tries POST /api/ai/generate-summary first (the dedicated endpoint) and
+  // falls back to the long-standing POST /api/ai/summarize when the backend
+  // hasn't been restarted since that route was added — so Generate works either
+  // way. `credentials: 'include'` is required: both routes sit behind requireUser
+  // and the session lives in an httpOnly cookie.
   const handleGenerateAiSummary = async () => {
     setIsGeneratingAi(true);
     try {
-      const res = await fetch('/api/ai/summarize-report', {
+      const payload = {
+        kind: 'report',
+        tone: 'professional',
+        text: buildAiSummaryText(),
+        staffName: currentUser.name,
+        position: currentUser.position,
+        department: currentUser.department,
+        period: `Week ${selectedWeek}, ${selectedYear}`,
+        checklistItems: isCreating ? checklistState : activeReport?.checklistItems || [],
+        notes: isCreating ? reportNotes : activeReport?.notes || ''
+      };
+      const opts = {
         method: 'POST',
+        credentials: 'include' as RequestCredentials,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          staffName: currentUser.name,
-          position: currentUser.position,
-          department: currentUser.department,
-          period: `Week ${selectedWeek}, ${selectedYear}`,
-          checklistItems: isCreating ? checklistState : activeReport?.checklistItems || [],
-          notes: isCreating ? reportNotes : activeReport?.notes || ''
-        })
-      });
+        body: JSON.stringify(payload)
+      };
 
-      const data = await res.json();
-      if (data.success) {
-        setAiSummaryText(data.summary);
+      let res = await fetch('/api/ai/generate-summary', opts);
+      if (res.status === 404) {
+        // Older backend without the dedicated route — use the shared one.
+        res = await fetch('/api/ai/summarize', opts);
+      }
+
+      const data = await res.json().catch(() => null);
+      const summary = data?.data?.summary ?? data?.data?.output;
+      if (data?.success && summary) {
+        setAiSummaryText(summary);
       } else {
-        setAiSummaryText('Unable to generate AI summary at this moment.');
+        // Surface the real server reason instead of a generic string that hides
+        // the actual problem. Handles every error shape this endpoint has used:
+        //   { message }              – backend ApiError envelope
+        //   { error: "string" }      – frontend-server style
+        //   { error: '{"error":{...}}' } – Gemini error stringified twice
+        setAiSummaryText(
+          extractAiError(data) ||
+          `Unable to generate AI summary (HTTP ${res.status}). Please try again.`
+        );
       }
     } catch (err) {
       console.error(err);
-      setAiSummaryText('AI Service connection timeout.');
+      setAiSummaryText('AI Service connection timeout. Please check your connection and try again.');
     } finally {
       setIsGeneratingAi(false);
     }
@@ -1890,6 +2402,33 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
 
   return (
     <div className="p-2 space-y-6">
+      {/* Fixed bottom upload status — shows while proof files are pushed to S3
+          during Submit / Save as Draft. Removed automatically in `finally`. */}
+      {submitStatus && (
+        <div className="fixed inset-x-0 bottom-0 z-[95] flex justify-center px-4 pb-5 pointer-events-none">
+          <div className="pointer-events-auto w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900/95 px-4 py-3 shadow-2xl backdrop-blur">
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex min-w-0 items-center gap-2 text-xs font-bold text-white">
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-400" />
+                <span className="truncate">{submitStatus.label}</span>
+              </span>
+              <span className="shrink-0 text-xs font-black tabular-nums text-blue-300">
+                {submitStatus.percent}%
+              </span>
+            </div>
+            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-700">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-emerald-400 transition-[width] duration-200 ease-out"
+                style={{ width: `${submitStatus.percent}%` }}
+              />
+            </div>
+            {submitStatus.detail && (
+              <p className="mt-1.5 truncate text-[11px] text-slate-400">{submitStatus.detail}</p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Full-page mode header (create / edit) — full-width bar flush to the top/left/right */}
       {pageMode && (
         <div className="bg-white border-b border-slate-200 -mx-2 -mt-2 px-2 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -1901,7 +2440,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
               <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2 mb-0.5">
                 <span className="text-xs text-slate-500 font-medium">Position: {currentUser.position}</span>
               </div>
-              <h2 className="text-xl font-bold tracking-tight text-slate-900">APA {import.meta.env.VITE_APP ?? '1'} - Staff Report</h2>
+              <h2 className="text-xl font-bold tracking-tight text-slate-900">APA 2 - Staff Report</h2>
             </div>
           </div>
 
@@ -2190,34 +2729,88 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                       <option value="Approved">Approved</option>
                     </ModernSelect>
                   </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <ModernSelect
+                      value={subordinateYearFilter}
+                      onChange={e => setSubordinateYearFilter(e.target.value)}
+                      aria-label="Filter subordinate reports by year"
+                      className="flex-1 px-2 py-1 border border-slate-300 rounded-lg text-[11px] bg-white font-medium text-slate-700"
+                    >
+                      <option value="all">All Years</option>
+                      {subordinateYearOptions.map(y => (
+                        <option key={y} value={String(y)}>{y}</option>
+                      ))}
+                    </ModernSelect>
+                    <ModernSelect
+                      value={subordinateWeekFilter}
+                      onChange={e => setSubordinateWeekFilter(e.target.value)}
+                      aria-label="Filter subordinate reports by week"
+                      className="flex-1 px-2 py-1 border border-slate-300 rounded-lg text-[11px] bg-white font-medium text-slate-700"
+                    >
+                      <option value="all">All Weeks</option>
+                      {TR_WEEK_OPTIONS.map(w => (
+                        <option key={w} value={String(w)}>Week {w}</option>
+                      ))}
+                    </ModernSelect>
+                  </div>
+
+                  {/* Selection + saved chat-style summary actions */}
+                  <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1.5 border-t border-slate-200">
+                    <label className="flex items-center gap-1.5 text-[10px] font-bold text-slate-600 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={allVisibleSubReportsSelected}
+                        onChange={toggleSelectAllVisibleSubReports}
+                        disabled={visibleSubReportIds.length === 0}
+                        className="w-3.5 h-3.5 accent-blue-600 cursor-pointer"
+                      />
+                      Select all visible
+                    </label>
+                    <div className="flex items-center gap-1.5 ml-auto">
+                      {selectedSubReportCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedSubReportIds(new Set())}
+                          className="px-2 py-1 text-[10px] font-bold text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer"
+                        >
+                          Clear
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={openTeamSummaryHistory}
+                        disabled={isLoadingTeamSummaryHistory}
+                        className="px-2 py-1 text-[10px] font-bold text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-lg border border-slate-200 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                      >
+                        <History className="w-3 h-3" /> History
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleGenerateTeamSummary}
+                        disabled={selectedSubReportCount === 0 || isGeneratingTeamSummary}
+                        className="px-2.5 py-1 text-[10px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {isGeneratingTeamSummary ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                        Summary ({selectedSubReportCount})
+                      </button>
+                    </div>
+                  </div>
                 </div>
               );
             })()}
 
             <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
               {(() => {
-                let filtered = reports.filter(r =>
-                  trSubTab === 'my_reports' ? r.staffId === currentUser.id : directSubIds.has(r.staffId)
-                );
-
-                if (trSubTab === 'subordinate_reports') {
-                  if (subordinateStaffFilter !== 'all') {
-                    filtered = filtered.filter(r => r.staffId === subordinateStaffFilter);
-                  }
-                  if (subordinateStatusFilter !== 'all') {
-                    filtered = filtered.filter(r => (r.status || 'Submitted') === subordinateStatusFilter);
-                  }
-                  if (subordinateSearchQuery.trim()) {
-                    const q = subordinateSearchQuery.toLowerCase();
-                    filtered = filtered.filter(r =>
-                      r.staffName.toLowerCase().includes(q) ||
-                      r.position.toLowerCase().includes(q) ||
-                      `w${r.weekNumber}`.includes(q) ||
-                      `week ${r.weekNumber}`.includes(q) ||
-                      r.year.toString().includes(q)
-                    );
-                  }
-                }
+                const filtered = trSubTab === 'my_reports'
+                  ? reports.filter(r => r.staffId === currentUser.id)
+                  : subordinateFilteredReports;
+                const hasActiveSubordinateFilters =
+                  subordinateStaffFilter !== 'all' ||
+                  subordinateStatusFilter !== 'all' ||
+                  subordinateYearFilter !== 'all' ||
+                  subordinateWeekFilter !== 'all' ||
+                  !!subordinateSearchQuery.trim();
 
                 if (filtered.length === 0) {
                   return (
@@ -2226,16 +2819,18 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                       <p className="font-medium">
                         {trSubTab === 'my_reports'
                           ? "You haven't created any weekly reports yet."
-                          : (subordinateStaffFilter !== 'all' || subordinateStatusFilter !== 'all' || subordinateSearchQuery)
-                          ? "No reports match the selected staff filter."
+                          : hasActiveSubordinateFilters
+                          ? "No reports match the selected filters."
                           : "No reports submitted by your subordinates yet."}
                       </p>
-                      {trSubTab === 'subordinate_reports' && (subordinateStaffFilter !== 'all' || subordinateStatusFilter !== 'all' || subordinateSearchQuery) && (
+                      {trSubTab === 'subordinate_reports' && hasActiveSubordinateFilters && (
                         <button
                           type="button"
                           onClick={() => {
                             setSubordinateStaffFilter('all');
                             setSubordinateStatusFilter('all');
+                            setSubordinateYearFilter('all');
+                            setSubordinateWeekFilter('all');
                             setSubordinateSearchQuery('');
                           }}
                           className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold inline-flex items-center gap-1 cursor-pointer"
@@ -2255,20 +2850,32 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                   );
                 }
 
-                return filtered.map(rep => (
-                  <button
-                    key={rep.id}
-                    onClick={() => {
-                      setActiveReport(rep);
-                      setIsCreating(false);
-                      setShowMobileDetail(true);
-                    }}
-                    className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer ${
-                      activeReport?.id === rep.id && !isCreating
-                        ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-500/20'
-                        : 'border-slate-200 hover:border-blue-300 hover:bg-slate-50'
-                    }`}
-                  >
+                return filtered.map(rep => {
+                  const isSubordinateSelection = trSubTab === 'subordinate_reports';
+                  return (
+                    <div key={rep.id} className="flex items-start gap-2">
+                      {isSubordinateSelection && (
+                        <input
+                          type="checkbox"
+                          checked={selectedSubReportIds.has(rep.id)}
+                          onChange={() => toggleSubReportSelection(rep.id)}
+                          onClick={e => e.stopPropagation()}
+                          className="mt-3 w-4 h-4 accent-blue-600 cursor-pointer shrink-0"
+                          aria-label={`Select report from ${rep.staffName}, week ${rep.weekNumber}`}
+                        />
+                      )}
+                      <button
+                        onClick={() => {
+                          setActiveReport(rep);
+                          setIsCreating(false);
+                          setShowMobileDetail(true);
+                        }}
+                        className={`flex-1 text-left p-3 rounded-xl border transition-all cursor-pointer ${
+                          activeReport?.id === rep.id && !isCreating
+                            ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-500/20'
+                            : 'border-slate-200 hover:border-blue-300 hover:bg-slate-50'
+                        }`}
+                      >
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-bold text-slate-900">{rep.staffName}</span>
                       {rep.status === 'Approved' || rep.status === 'Reviewed' ? (
@@ -2364,8 +2971,10 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                       }
                       return null;
                     })()}
-                  </button>
-                ));
+                      </button>
+                    </div>
+                  );
+                });
               })()}
             </div>
           </div>
@@ -2741,7 +3350,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                     </div>
                     <span className="block w-full text-[11px] text-slate-500 mt-1">
                       {totalCount > 0
-                        ? `${completedCount} of ${applicableCount} applicable deliverables completed${naCount > 0 ? ` (${naCount} marked N/A - excluded from score)` : ''}${pillar1.locked > 0 ? ` (${pillar1.locked} already fulfilled earlier in this cycle - excluded from score)` : ''}. Weekly routine tasks cannot be marked N/A; Anytime tasks may be set to N/A at any time; Year Tasks allow N/A until the cycle's final month (January).`
+                        ? `${completedCount} of ${applicableCount} applicable deliverables completed${naCount > 0 ? ` (${naCount} marked N/A - excluded from score)` : ''}${pillar1.locked > 0 ? ` (${pillar1.locked} already fulfilled earlier in this cycle - excluded from score)` : ''}. Weekly items may be marked N/A when they do not apply; Monthly and Year Tasks retain their cycle locks; Anytime tasks may be set to N/A at any time.`
                         : 'No checklist deliverables registered yet for this position & department.'}
                     </span>
                   </div>
@@ -3192,7 +3801,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                               />
                             </div>
 
-                            {/* 3-State Controls: Done / Incomplete / N/A (Locked for Weekly, Enabled for Monthly unless Final Week) */}
+                              {/* 3-State Controls: Done / Incomplete / N/A, with monthly/yearly cycle locks */}
                               {controlsLocked ? (
                                 <div
                                   className="flex items-center gap-1.5 shrink-0 bg-emerald-50 p-2 rounded-xl border border-emerald-200 shadow-2xs self-end sm:self-center cursor-not-allowed select-none"
@@ -3248,7 +3857,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                               </button>
 
                               {/* N/A button:
-                                  - Weekly  -> never available (fixed routine)
+                                  - Weekly  -> available when the task is not applicable
                                   - Anytime -> ALWAYS available, never locked
                                   - Monthly -> available unless locked in the month's final week */}
                               {isAnytimeItem ? (
@@ -3314,13 +3923,19 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                                   </button>
                                 )
                               ) : (
-                                <div
-                                  className="px-2 py-1 text-[11px] font-medium text-slate-300 rounded flex items-center gap-1 cursor-not-allowed select-none"
-                                  title="Fixed weekly tasks must be executed every week (N/A is disabled for Weekly JD items)"
+                                <button
+                                  type="button"
+                                  onClick={() => handleSetItemStatus(item.itemId, 'na')}
+                                  className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer ${
+                                    itemStatus === 'na'
+                                      ? 'bg-slate-700 text-white shadow-xs'
+                                      : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                                  }`}
+                                  title="Mark this weekly deliverable as not applicable for this reporting period"
                                 >
-                                  <MinusCircle className="w-3 h-3 text-slate-300" />
-                                  <span className="text-[10px]">No N/A</span>
-                                </div>
+                                  <MinusCircle className="w-3.5 h-3.5" />
+                                  <span>N/A</span>
+                                </button>
                               )}
                             </div>
                             )}
@@ -3341,6 +3956,30 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                   onChange={e => setReportNotes(e.target.value)}
                   placeholder="Provide additional details regarding weekly responsibilities..."
                   className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                />
+              </div>
+
+              {/* Weekly Summary Form (IRG-HR-FRM-WSUM-001 v1.1) — below the
+                  checklist, above the Superior Evaluation Feedback box. */}
+              <div className="border-t border-slate-100 pt-5">
+                <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <FileText className="w-4 h-4 text-emerald-600" />
+                      Weekly Summary Form
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      IRG-HR-FRM-WSUM-001 v1.1 · Submitted together with your JD checklist.
+                    </p>
+                  </div>
+                </div>
+                <WeeklySummaryForm
+                  value={weeklySummary}
+                  onChange={setWeeklySummary}
+                  taskTitles={checklistState.map(c => c.title)}
+                  weekStart={startDateInput || getWeekDateRange(selectedWeek, selectedYear).startDate}
+                  weekEnd={endDateInput || getWeekDateRange(selectedWeek, selectedYear).endDate}
+                  hideConfirm
                 />
               </div>
 
@@ -3446,7 +4085,7 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
               <div className="bg-slate-50/70 border border-slate-200 rounded-xl p-3.5 space-y-2">
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
                   <label className="block text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                    <Paperclip className="w-4 h-4 text-blue-600" /> Deliverable Proof & Supporting Evidence
+                    <Paperclip className="w-4 h-4 text-blue-600" /> I. Attachments — Deliverable Proof &amp; Supporting Evidence
                   </label>
                   <span className="text-[11px] text-slate-500">Attach files, Drive links, or Telegram message links</span>
                 </div>
@@ -3455,6 +4094,32 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                   onChange={setMultiProof}
                   readOnly={false}
                 />
+              </div>
+
+              {/* Weekly Summary Form — Section J (Confirmation) */}
+              <div className="border border-slate-200 rounded-xl p-4 bg-white">
+                <div className="mb-3">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h4 className="text-sm font-bold text-slate-900">J. Confirmation &amp; submit</h4>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-rose-50 text-rose-700 border-rose-200">
+                      Required
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Confirm the information before submitting the checklist and summary together.
+                  </p>
+                </div>
+                <label className="flex items-start gap-2.5 p-3 rounded-lg bg-slate-50 border border-slate-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={weeklySummary.confirmed}
+                    onChange={e => setWeeklySummary({ ...weeklySummary, confirmed: e.target.checked })}
+                    className="mt-0.5 w-4 h-4 accent-blue-600"
+                  />
+                  <span className="text-xs text-slate-700">
+                    I confirm that the information in this weekly checklist and summary is correct.
+                  </span>
+                </label>
               </div>
 
               {/* AI Summary Assistant */}
@@ -3925,9 +4590,10 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                       </button>
                     )}
 
-                    {/* Delete Report Button — same rules as Edit: available on Draft reports and for
-                        superior/managers on subordinate reports not yet Approved/Reviewed. */}
-                    {(activeReport.status === 'Draft' || (activeReport.staffId !== currentUser.id && canManageReport(activeReport) && activeReport.status !== 'Approved' && activeReport.status !== 'Reviewed')) && (
+                    {/* Delete Report Button — available on Draft reports and for
+                        superior/managers on subordinate reports at any status
+                        (including Approved/Reviewed). */}
+                    {(activeReport.status === 'Draft' || (activeReport.staffId !== currentUser.id && canManageReport(activeReport))) && (
                       <button
                         onClick={() => setReportToDelete(activeReport)}
                         className="px-3 py-2 bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
@@ -4183,6 +4849,29 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
                 <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs">
                   <span className="font-bold text-slate-800 block mb-1">Staff Additional Remarks:</span>
                   <p className="text-slate-700">{activeReport.notes}</p>
+                </div>
+              )}
+
+              {/* Weekly Summary Form (read-only — superior reviews checklist + summary on one screen) */}
+              {viewSummary && (
+                <div className="border-t border-slate-100 pt-5">
+                  <div className="mb-3">
+                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <FileText className="w-4 h-4 text-emerald-600" />
+                      Weekly Summary Form
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      IRG-HR-FRM-WSUM-001 v1.1 · submitted with this JD checklist.
+                    </p>
+                  </div>
+                  <WeeklySummaryForm
+                    value={viewSummary}
+                    onChange={() => {}}
+                    taskTitles={(activeReport.checklistItems || []).map(c => c.title)}
+                    weekStart={activeReport.startDate}
+                    weekEnd={activeReport.endDate}
+                    readOnly
+                  />
                 </div>
               )}
 
@@ -5090,6 +5779,288 @@ export const TRReportView: React.FC<TRReportViewProps> = ({ currentUser, pageMod
               >
                 Continue Editing
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Chat-style saved AI summaries for selected subordinate reports */}
+      {isTeamSummaryOpen && (
+        <div
+          className="fixed inset-0 z-[80] bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
+          onClick={() => setIsTeamSummaryOpen(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl h-[85vh] max-h-[720px] flex flex-col border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-slate-200 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-indigo-50 rounded-xl">
+                  <Sparkles className="w-5 h-5 text-indigo-600" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-slate-900">Report Summaries</h3>
+                  <p className="text-[11px] text-slate-500">
+                    Selected subordinate reports and their saved AI summaries.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsTeamSummaryOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
+                aria-label="Close summaries"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="shrink-0 px-4 py-2.5 border-b border-slate-200 bg-white space-y-2">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                <div className="relative flex-1 min-w-0">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="search"
+                    value={summaryHistorySearch}
+                    onChange={(e) => setSummaryHistorySearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void applyTeamSummaryFilters();
+                    }}
+                    placeholder="Search summaries, staff, week..."
+                    className="w-full pl-8 pr-2.5 py-1.5 rounded-lg border border-slate-200 text-[11px] bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <input
+                    type="date"
+                    value={summaryHistoryFrom}
+                    onChange={(e) => setSummaryHistoryFrom(e.target.value)}
+                    aria-label="Summary history from date"
+                    className="px-2 py-1.5 rounded-lg border border-slate-200 text-[11px] bg-white text-slate-700"
+                  />
+                  <span className="text-[10px] font-bold text-slate-400">to</span>
+                  <input
+                    type="date"
+                    value={summaryHistoryTo}
+                    onChange={(e) => setSummaryHistoryTo(e.target.value)}
+                    aria-label="Summary history to date"
+                    className="px-2 py-1.5 rounded-lg border border-slate-200 text-[11px] bg-white text-slate-700"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void applyTeamSummaryFilters()}
+                    disabled={isLoadingTeamSummaryHistory}
+                    className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold disabled:opacity-50 cursor-pointer"
+                  >
+                    Apply
+                  </button>
+                  <button
+                    type="button"
+                    onClick={clearTeamSummaryFilters}
+                    disabled={isLoadingTeamSummaryHistory}
+                    className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 text-[10px] font-bold disabled:opacity-50 cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wide">Quick:</span>
+                {([
+                  ['all', 'All time'],
+                  ['7d', 'Last 7 days'],
+                  ['30d', 'Last 30 days'],
+                  ['month', 'This month']
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => applyTeamSummaryDatePreset(value)}
+                    className="px-1.5 py-0.5 rounded-md border border-slate-200 text-[10px] font-bold text-slate-600 hover:text-blue-700 hover:bg-blue-50 cursor-pointer"
+                  >
+                    {label}
+                  </button>
+                ))}
+                <span className="ml-auto text-[10px] font-semibold text-slate-400">
+                  {teamSummaryTotal > 0
+                    ? `Showing ${teamSummaryHistory.length} of ${teamSummaryTotal}`
+                    : 'No saved summaries'}
+                </span>
+              </div>
+            </div>
+
+            <div ref={teamSummaryScrollRef} className="flex-1 overflow-y-auto bg-slate-50 px-4 py-4 space-y-5">
+              {teamSummaryHasMore && (
+                <div className="flex justify-center">
+                  <button
+                    type="button"
+                    onClick={handleLoadMoreTeamSummaries}
+                    disabled={isLoadingMoreTeamSummaries}
+                    className="px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-[10px] font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-50 cursor-pointer inline-flex items-center gap-1.5"
+                  >
+                    {isLoadingMoreTeamSummaries
+                      ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      : <History className="w-3.5 h-3.5" />}
+                    {isLoadingMoreTeamSummaries
+                      ? 'Loading older summaries…'
+                      : `Load older summaries${teamSummaryTotal > teamSummaryHistory.length ? ` (${teamSummaryTotal - teamSummaryHistory.length} more)` : ''}`}
+                  </button>
+                </div>
+              )}
+
+              {isLoadingTeamSummaryHistory && teamSummaryHistory.length === 0 && pendingSummaryReports.length === 0 && (
+                <div className="h-full flex items-center justify-center text-slate-400 text-xs gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Loading saved summaries…
+                </div>
+              )}
+
+              {[...teamSummaryHistory].reverse().map((record) => (
+                <div key={record.code} className="space-y-2">
+                  <div className="flex justify-end">
+                    <div className="max-w-[85%] bg-blue-600 text-white rounded-2xl rounded-br-md px-3 py-2 text-xs shadow-xs">
+                      <div className="font-bold mb-1.5 flex items-center gap-1.5">
+                        <Users className="w-3.5 h-3.5" />
+                        Summarize {record.reportCount} report{record.reportCount === 1 ? '' : 's'}
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {record.reportSnapshot.map((r) => (
+                          <span key={r.code} className="bg-white/15 rounded-md px-1.5 py-0.5 text-[10px] font-semibold">
+                            {r.staffName} • W{r.weekNumber}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-start">
+                    <div className="max-w-[90%] bg-white border border-slate-200 rounded-2xl rounded-bl-md px-3 py-2.5 text-xs shadow-xs">
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <span className="text-[10px] font-black uppercase tracking-wide text-indigo-600 flex items-center gap-1">
+                          <Sparkles className="w-3 h-3" /> AI Summary
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleCopyTeamSummary(record)}
+                            className="px-1.5 py-0.5 text-[10px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-md inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            {copiedSummaryCode === record.code
+                              ? <Check className="w-3 h-3 text-emerald-600" />
+                              : <Copy className="w-3 h-3" />}
+                            {copiedSummaryCode === record.code ? 'Copied' : 'Copy'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteTeamSummary(record)}
+                            disabled={deletingSummaryCode === record.code}
+                            className="px-1.5 py-0.5 text-[10px] font-bold text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-md inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                            aria-label="Delete saved summary"
+                          >
+                            {deletingSummaryCode === record.code
+                              ? <Loader2 className="w-3 h-3 animate-spin" />
+                              : <Trash2 className="w-3 h-3" />}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="whitespace-pre-wrap leading-relaxed text-slate-800">
+                        {record.summaryText}
+                      </div>
+                      <div className="mt-2 text-[10px] text-slate-400">
+                        {new Date(record.createdAt).toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              {pendingSummaryReports.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex justify-end">
+                    <div className="max-w-[85%] bg-blue-600 text-white rounded-2xl rounded-br-md px-3 py-2 text-xs shadow-xs">
+                      <div className="font-bold mb-1.5 flex items-center gap-1.5">
+                        <Users className="w-3.5 h-3.5" />
+                        Summarize {pendingSummaryReports.length} report{pendingSummaryReports.length === 1 ? '' : 's'}
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {pendingSummaryReports.map((r) => (
+                          <span key={r.id} className="bg-white/15 rounded-md px-1.5 py-0.5 text-[10px] font-semibold">
+                            {r.staffName} • W{r.weekNumber}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex justify-start">
+                    <div className="max-w-[90%] bg-white border border-slate-200 rounded-2xl rounded-bl-md px-3 py-2.5 text-xs shadow-xs text-slate-500 inline-flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin text-indigo-600" /> Generating summary…
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {!isLoadingTeamSummaryHistory && !isGeneratingTeamSummary
+                && pendingSummaryReports.length === 0 && teamSummaryHistory.length === 0 && (
+                <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 gap-2 px-6">
+                  <div className="p-3 bg-white border border-slate-200 rounded-2xl shadow-xs">
+                    <Sparkles className="w-6 h-6 text-slate-300" />
+                  </div>
+                  <p className="text-xs font-bold text-slate-600">
+                    {summaryHistorySearch.trim() || summaryHistoryFrom || summaryHistoryTo
+                      ? 'No summaries match these filters'
+                      : 'No summaries yet'}
+                  </p>
+                  <p className="text-[11px] max-w-xs">
+                    {summaryHistorySearch.trim() || summaryHistoryFrom || summaryHistoryTo
+                      ? 'Try a wider date range or clear the search filters.'
+                      : 'Select one or more subordinate reports from the list, then click Summary to create the first entry.'}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {teamSummaryError && (
+              <div className="shrink-0 px-4 py-2 bg-rose-50 border-t border-rose-200 text-[11px] text-rose-700 flex items-center justify-between gap-2">
+                <span className="truncate">{teamSummaryError}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (selectedSubReportCount > 0) void handleGenerateTeamSummary();
+                    else void applyTeamSummaryFilters();
+                  }}
+                  disabled={isGeneratingTeamSummary}
+                  className="px-2 py-1 bg-white border border-rose-200 rounded-lg font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-50 cursor-pointer"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            <div className="shrink-0 px-4 py-3 border-t border-slate-200 bg-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <p className="text-[11px] text-slate-500">
+                {selectedSubReportCount > 0
+                  ? `${selectedSubReportCount} report${selectedSubReportCount === 1 ? '' : 's'} selected`
+                  : 'Select subordinate reports from the list to generate another summary.'}
+              </p>
+              <div className="flex items-center gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setIsTeamSummaryOpen(false)}
+                  className="px-3 py-1.5 border border-slate-300 text-slate-700 rounded-xl text-xs font-bold hover:bg-slate-50 cursor-pointer"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={handleGenerateTeamSummary}
+                  disabled={selectedSubReportCount === 0 || isGeneratingTeamSummary}
+                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isGeneratingTeamSummary
+                    ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    : <Sparkles className="w-3.5 h-3.5" />}
+                  {isGeneratingTeamSummary ? 'Generating…' : 'Generate Summary'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

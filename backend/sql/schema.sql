@@ -1,16 +1,16 @@
 -- ============================================================
 -- APA Staff Report — Database Schema
--- Target: MySQL 8.x  (port 3308 local)
+-- Target: MySQL 8.x, the existing APA 2 Staff Report database
 -- Business-ID convention: each table has numeric PK `id` +
 -- human `code` (e.g. user_shawn, trs_xxx) to stay compatible
 -- with the SPA data model.
 -- ============================================================
 
-CREATE DATABASE IF NOT EXISTS apastaffreport
+CREATE DATABASE IF NOT EXISTS `APA 2 - Staff Report`
   CHARACTER SET utf8mb4
   COLLATE utf8mb4_unicode_ci;
 
-USE apastaffreport;
+USE `APA 2 - Staff Report`;
 
 -- ------------------------------------------------------------
 -- users
@@ -313,3 +313,23 @@ CREATE TABLE IF NOT EXISTS api_keys (
 ) ENGINE=InnoDB;
 
 -- Log/notification capping (e.g. keep last 5000) is enforced in the app layer.
+
+-- ------------------------------------------------------------
+-- tr_team_summaries (saved AI summaries for selected reports)
+-- Kept separate from `reports`; each generation is immutable history.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tr_team_summaries (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  code VARCHAR(64) NOT NULL,
+  generated_by VARCHAR(64) NOT NULL,
+  generated_by_name VARCHAR(128) NULL,
+  title VARCHAR(255) NOT NULL DEFAULT '',
+  report_codes JSON NOT NULL,
+  report_snapshot JSON NOT NULL,
+  report_count SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  summary_text MEDIUMTEXT NOT NULL,
+  model VARCHAR(64) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_team_summary_code (code),
+  KEY idx_team_summary_owner (generated_by, created_at)
+) ENGINE=InnoDB;

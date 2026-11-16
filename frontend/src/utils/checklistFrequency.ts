@@ -6,7 +6,7 @@ import { ChecklistFrequency, ChecklistItemStatus } from '../types';
  * The three frequencies differ in exactly one behavioural axis: whether (and
  * when) staff may mark a deliverable N/A.
  *
- *   Weekly   fixed routine  -> N/A never allowed
+ *   Weekly   fixed routine  -> N/A available when it is not applicable
  *   Monthly  periodic duty  -> N/A allowed, but LOCKED in the month's final
  *                              week if it was not completed earlier that month.
  *                              The owner schedules it in exactly one week of the
@@ -30,9 +30,9 @@ export const CHECKLIST_FREQUENCIES: ChecklistFrequency[] = ['Weekly', 'Monthly',
 /** Default when a category cell is blank or unrecognized. */
 export const DEFAULT_FREQUENCY: ChecklistFrequency = 'Weekly';
 
-/** Can staff ever mark this deliverable N/A? */
+/** Can staff mark this deliverable N/A? Monthly/yearly cycle locks are applied separately. */
 export function allowsNA(category: ChecklistFrequency | string | undefined | null): boolean {
-  return category === 'Monthly' || category === 'Anytime' || category === 'Yearly';
+  return category === 'Weekly' || category === 'Monthly' || category === 'Anytime' || category === 'Yearly';
 }
 
 /**
@@ -53,7 +53,9 @@ export function allowsNA(category: ChecklistFrequency | string | undefined | nul
 export function defaultItemStatus(
   category: ChecklistFrequency | string | undefined | null
 ): ChecklistItemStatus {
-  return allowsNA(category) ? 'na' : 'incomplete';
+  // Weekly items remain actionable by default; enabling an explicit N/A choice
+  // must not silently pre-mark a new weekly report as N/A.
+  return category === 'Monthly' || category === 'Anytime' || category === 'Yearly' ? 'na' : 'incomplete';
 }
 
 /** Anytime duties are exempt from every month-end lock and reminder. */
@@ -172,7 +174,7 @@ export function frequencyLabel(
 
 /** Human-readable explanation used in tooltips. */
 export function frequencyRuleHint(category: ChecklistFrequency | string | undefined | null): string {
-  if (category === 'Weekly') return 'Fixed weekly tasks must be executed every week (N/A is disabled for Weekly JD items)';
+  if (category === 'Weekly') return 'Choose N/A only when this weekly deliverable does not apply to this reporting period';
   if (category === 'Anytime') return 'Anytime tasks are executed on demand — you may select N/A at any time, in any week.';
   if (category === 'Yearly') return 'Year Tasks are scheduled in one week of the annual cycle (1 submission per year); every other week of the cycle shows them locked. N/A is available until the cycle ends — it is blocked in the final month (January of the next year), where the task expires on 31 Jan.';
   return 'Monthly tasks may be marked N/A, except in the final week of the month when they are still outstanding. You schedule each monthly task in one week only; other weeks of the month then show it as locked.';

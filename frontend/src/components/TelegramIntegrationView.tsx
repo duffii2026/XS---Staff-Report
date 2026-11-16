@@ -37,7 +37,8 @@ import {
   Link2,
   Loader2,
   ChevronDown,
-  X
+  X,
+  Save
 } from 'lucide-react';
 import { ModernSelect } from './ModernSelect';
 
@@ -77,8 +78,12 @@ export const TelegramIntegrationView: React.FC<TelegramIntegrationViewProps> = (
   const [outboxFilter, setOutboxFilter] = useState<string>('all');
   const [configLoading, setConfigLoading] = useState(true);
 
-  // Token verification
-  const [isVerifyingToken, setIsVerifyingToken] = useState(false);
+  // Group selection
+  const [groups, setGroups] = useState<TelegramGroupInfo[]>([]);
+  const [isLoadingGroups, setIsLoadingGroups] = useState(false);
+  const [selectedGroup, setSelectedGroup] = useState<TelegramGroupInfo | null>(null);
+  const [savedGroup, setSavedGroup] = useState<TelegramGroupInfo | null>(null);
+  const [isLoadingSavedGroup, setIsLoadingSavedGroup] = useState(false);
 
   const showToast = (text: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToastMsg({ text, type });
@@ -92,6 +97,10 @@ export const TelegramIntegrationView: React.FC<TelegramIntegrationViewProps> = (
       if (!cancelled) {
         setConfig(cfg);
         setConfigLoading(false);
+        // Fetch saved group info if mainGroupChatId is set
+        if (cfg.mainGroupChatId && cfg.botToken) {
+          fetchSavedGroupInfo(cfg.mainGroupChatId, cfg.botToken);
+        }
       }
     }).catch(() => {
       if (!cancelled) setConfigLoading(false);
@@ -101,6 +110,32 @@ export const TelegramIntegrationView: React.FC<TelegramIntegrationViewProps> = (
     }, 4000);
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
+
+  const fetchSavedGroupInfo = async (chatId: string, botToken: string) => {
+    setIsLoadingSavedGroup(true);
+    try {
+      const data = await api.post<any>('/telegram/groups', { bot_token: botToken });
+      const group = data.groups?.find((g: TelegramGroupInfo) => String(g.chat_id) === String(chatId));
+      if (group) {
+        setSavedGroup(group);
+      } else {
+        // Group not in recent updates, try getChat directly
+        const chatData = await api.post<any>('/telegram/get-chat', { bot_token: botToken, chat_id: chatId });
+        if (chatData.ok && chatData.result) {
+          setSavedGroup({
+            chat_id: chatData.result.id,
+            type: chatData.result.type,
+            title: chatData.result.title || chatData.result.username || `Chat ${chatData.result.id}`,
+            username: chatData.result.username || null
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch saved group info:', err);
+    } finally {
+      setIsLoadingSavedGroup(false);
+    }
+  };
 
   const handleSaveConfig = (newConfig: TelegramConfig) => {
     setConfig(newConfig);
@@ -156,12 +191,11 @@ export const TelegramIntegrationView: React.FC<TelegramIntegrationViewProps> = (
         details: `Dispatched by ${currentUser.name} (${currentUser.role}) at ${new Date().toLocaleTimeString()}`
       });
 
-      const targetChatId = config.mainGroupChatId;
       if (!config.isEnabled) {
         addTelegramOutboxLog({
           eventType: 'TEST_MESSAGE',
           targetType: 'direct_dm',
-          targetChatId: targetChatId || 'Pending Connection',
+          targetChatId: config.mainGroupChatId || 'Pending Connection',
           targetRecipientName: currentUser.name,
           formattedText: formattedHtml,
           status: 'simulated'
@@ -170,39 +204,35 @@ export const TelegramIntegrationView: React.FC<TelegramIntegrationViewProps> = (
         showToast('Telegram integration is disabled — test formatted & logged in Outbox (Simulation Mode).', 'info');
         return;
       }
-      if (!targetChatId) {
-        addTelegramOutboxLog({
-          eventType: 'TEST_MESSAGE',
-          targetType: 'direct_dm',
-          targetChatId: 'Pending Connection',
-          targetRecipientName: currentUser.name,
-          formattedText: formattedHtml,
-          status: 'simulated'
-        });
-        setOutboxLogs(getTelegramOutbox());
-        showToast('No group linked yet — the test was logged in Outbox (Simulation Mode).', 'error');
-        return;
-      }
 
       try {
-        await api.post('/telegram/test', { chat_id: targetChatId, text: formattedHtml });
+        // No chat_id is sent — the backend resolves the destination: the
+        // admin's own linked Telegram chat first, then the configured channel.
+        const res: any = await api.post('/telegram/test', { text: formattedHtml });
+        const usedChatId = res?.chatId || 'Linked chat';
+        const isPrivate = res?.chat?.type === 'private';
         addTelegramOutboxLog({
           eventType: 'TEST_MESSAGE',
-          targetType: 'group',
-          targetChatId,
-          targetRecipientName: config.channelName || 'Linked group',
+          targetType: isPrivate ? 'direct_dm' : 'group',
+          targetChatId: usedChatId,
+          targetRecipientName: isPrivate ? currentUser.name : (config.channelName || 'Linked group'),
           formattedText: formattedHtml,
           status: 'sent'
         });
         setOutboxLogs(getTelegramOutbox());
-        showToast(`Test notification delivered to Telegram (${config.channelName || targetChatId})!`, 'success');
+        showToast(
+          isPrivate
+            ? `Test notification delivered to your Telegram chat (${usedChatId})!`
+            : `Test notification delivered to Telegram (${config.channelName || usedChatId})!`,
+          'success'
+        );
       } catch (err: any) {
         const errMsg = err?.message || 'Telegram send failed.';
         addTelegramOutboxLog({
           eventType: 'TEST_MESSAGE',
-          targetType: 'group',
-          targetChatId,
-          targetRecipientName: config.channelName || 'Linked group',
+          targetType: 'direct_dm',
+          targetChatId: config.mainGroupChatId || 'Pending Connection',
+          targetRecipientName: currentUser.name,
           formattedText: formattedHtml,
           status: 'failed',
           errorMessage: errMsg
@@ -225,26 +255,43 @@ export const TelegramIntegrationView: React.FC<TelegramIntegrationViewProps> = (
     }
   };
 
-  const handleVerifyToken = async () => {
-    const typedToken = config.botToken.trim();
-    if (!typedToken && !config.hasToken) {
-      showToast('Paste a Telegram Bot Token first to verify it.', 'error');
+  // Group handlers
+  const handleLoadGroups = async () => {
+    if (!config.botToken.trim()) {
+      showToast('Enter bot token first.', 'error');
       return;
     }
-    setIsVerifyingToken(true);
+    setIsLoadingGroups(true);
     try {
-      const data = await api.post<any>('/telegram/verify-token', {
-        bot_token: typedToken || (config.hasToken ? 'xxx' : '')
+      const data = await api.post<any>('/telegram/groups', {
+        bot_token: config.botToken.trim()
       });
-      if (data.valid) {
-        if (data.token_saved) setConfig(prev => ({ ...prev, hasToken: true }));
-        const uname = data.bot?.username ? `@${data.bot.username}` : '';
-        showToast(`Token verified — bot ${data.bot?.first_name || ''} ${uname} (ID ${data.bot?.id}) is live.`, 'success');
+      setGroups(data.groups || []);
+      if (data.bot?.username) {
+        setConfig({ ...config, botUsername: `@${data.bot.username}` });
+        showToast(`Token verified — bot ${data.bot.first_name} @${data.bot.username} (ID ${data.bot.id})`, 'success');
       }
+      showToast(`Loaded ${data.groups?.length || 0} groups`, 'success');
     } catch (err: any) {
-      showToast(err?.message || 'Token verification failed.', 'error');
+      showToast(err?.message || 'Failed to load groups.', 'error');
     } finally {
-      setIsVerifyingToken(false);
+      setIsLoadingGroups(false);
+    }
+  };
+
+  const handleSelectGroup = (group: TelegramGroupInfo) => {
+    setSelectedGroup(group);
+  };
+
+  const handleSaveSelectedGroup = async () => {
+    if (!selectedGroup) return;
+    try {
+      const updatedConfig = { ...config, mainGroupChatId: String(selectedGroup.chat_id) };
+      setConfig(updatedConfig);
+      saveTelegramConfig(updatedConfig);
+      showToast(`Saved "${selectedGroup.title}" as Main Group Chat ID`, 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to save group.', 'error');
     }
   };
 
@@ -549,32 +596,137 @@ export const TelegramIntegrationView: React.FC<TelegramIntegrationViewProps> = (
                     </div>
                     <button
                       type="button"
-                      onClick={handleVerifyToken}
-                      disabled={isVerifyingToken}
-                      className="px-3.5 py-2.5 border border-slate-300 text-slate-700 hover:border-blue-400 hover:text-blue-700 hover:bg-blue-50 rounded-xl text-xs font-bold flex items-center gap-1.5 shrink-0 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                      title="Validate the bot token via Telegram /getMe"
+                      onClick={handleLoadGroups}
+                      disabled={isLoadingGroups || !config.botToken.trim()}
+                      className="px-3.5 py-2.5 border border-slate-300 text-slate-700 hover:border-green-400 hover:text-green-700 hover:bg-green-50 rounded-xl text-xs font-bold flex items-center gap-1.5 shrink-0 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Verify token and fetch groups where bot is admin"
                     >
-                      {isVerifyingToken ? <Loader2 className="w-4 h-4 animate-spin" /> : <Shield className="w-4 h-4" />}
-                      Verify Token
+                      {isLoadingGroups ? <Loader2 className="w-4 h-4 animate-spin" /> : <Users className="w-4 h-4" />}
+                      Get Groups
                     </button>
                   </div>
                   <p className="text-[11px] text-slate-400 mt-1">
-                    Obtain your Bot Token by chatting with <strong>@BotFather</strong> on Telegram and typing <code>/newbot</code>. Paste it above, then click <strong>Verify Token</strong> to confirm it is live before saving.
+                    Obtain your Bot Token by chatting with <strong>@BotFather</strong> on Telegram and typing <code>/newbot</code>. Paste it above, then click <strong>Get Groups</strong> to verify and fetch groups where bot is admin.
                   </p>
                 </div>
+
+                {/* Currently Saved Group Display */}
+                {(config.mainGroupChatId || savedGroup) && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-blue-600" />
+                        <span className="font-bold text-sm text-blue-800">Currently Configured Group</span>
+                      </div>
+                      <span className="text-[11px] px-2 py-1 bg-blue-100 text-blue-700 rounded-full font-bold">
+                        {isLoadingSavedGroup ? 'Loading...' : (savedGroup ? 'Loaded' : 'Chat ID only')}
+                      </span>
+                    </div>
+                    {isLoadingSavedGroup ? (
+                      <div className="flex items-center gap-2 text-blue-600">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span className="text-sm">Fetching group details...</span>
+                      </div>
+                    ) : savedGroup ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between p-3 bg-white border border-blue-200 rounded-xl">
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-[11px] font-bold">
+                              <MessageSquare className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <div className="font-semibold text-slate-900">{savedGroup.title}</div>
+                              <div className="text-[10px] text-slate-500 font-mono">ID: {savedGroup.chat_id} {savedGroup.username ? `(@${savedGroup.username})` : ''}</div>
+                            </div>
+                          </div>
+                          <span className="text-[10px] px-2 py-1 bg-blue-100 text-blue-700 rounded-full font-bold">
+                            {savedGroup.type}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-blue-600">This group is used for AI message parsing and notifications.</p>
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-white border border-blue-200 rounded-xl">
+                        <div className="text-[10px] text-slate-500 font-mono">Chat ID: {config.mainGroupChatId}</div>
+                        <p className="text-[10px] text-blue-600 mt-1">Click "Get Groups" to fetch group details.</p>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
                     Bot Username
+                    <span className="ml-1.5 font-normal text-slate-400">auto-filled by “Get Groups”</span>
                   </label>
                   <input
                     type="text"
                     value={config.botUsername}
                     onChange={e => setConfig({ ...config, botUsername: e.target.value })}
-                    placeholder="@APATaskReportBot"
+                    placeholder="@Botusername"
                     className="w-full px-3.5 py-2 border border-slate-300 rounded-xl text-xs text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
                   />
                 </div>
+
+                {/* Group Selection for AI Message Monitoring */}
+                {groups.length > 0 && (
+                  <div className="bg-green-50 border border-green-200 rounded-2xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-green-600" />
+                        <span className="font-bold text-sm text-green-800">Group Selected for AI Monitoring</span>
+                      </div>
+                      <span className="text-[11px] px-2 py-1 bg-green-100 text-green-700 rounded-full font-bold">
+                        {groups.length} group{groups.length !== 1 ? 's' : ''} found
+                      </span>
+                    </div>
+                    <div className="space-y-2 max-h-48 overflow-y-auto">
+                      {groups.map((g, idx) => (
+                        <button
+                          key={g.chat_id}
+                          type="button"
+                          onClick={() => handleSelectGroup(g)}
+                          className={`w-full text-left px-3 py-2 border rounded-xl text-xs transition-all cursor-pointer ${
+                            selectedGroup?.chat_id === g.chat_id
+                              ? 'border-green-400 bg-green-50 text-green-900 shadow-sm'
+                              : 'border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="w-6 h-6 bg-green-100 text-green-700 rounded-full flex items-center justify-center text-[10px] font-bold">
+                                {idx + 1}
+                              </span>
+                              <div>
+                                <div className="font-semibold text-slate-900">{g.title}</div>
+                                <div className="text-[10px] text-slate-500 font-mono">ID: {g.chat_id} {g.username ? `(@${g.username})` : ''}</div>
+                              </div>
+                            </div>
+                            {selectedGroup?.chat_id === g.chat_id && (
+                              <CheckCircle2 className="w-4 h-4 text-green-600" />
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-500 mt-1">Type: {g.type}</div>
+                        </button>
+                      ))}
+                    </div>
+                    {selectedGroup && (
+                      <div className="pt-2 border-t border-green-200">
+                        <button
+                          type="button"
+                          onClick={handleSaveSelectedGroup}
+                          className="w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer flex items-center justify-center gap-2"
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          Save "{selectedGroup.title}" as Main Group Chat ID
+                        </button>
+                        <p className="text-[10px] text-green-600 mt-1 text-center">
+                          This group will be used for AI message parsing and notifications.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="pt-2 flex justify-end">
                   <button
@@ -629,18 +781,18 @@ export const TelegramIntegrationView: React.FC<TelegramIntegrationViewProps> = (
                   <strong>Create your Bot:</strong> Open Telegram, search for <code>@BotFather</code>, send <code>/newbot</code>, and follow the prompts to get your API Token.
                 </li>
                 <li>
-                  <strong>Add Bot to Group:</strong> Add your bot as an Administrator to your APA company or department Telegram group.
-                </li>
-                <li>
-                  <strong>Verify Your Token:</strong> Click <strong>Verify Token</strong> to confirm the bot is live before saving. A valid token shows your bot name, username, and ID.
+                  <strong>Verify Your Token:</strong> Click <strong>Verify Token</strong> to confirm the bot is live before saving. A valid token shows your bot name, username, and ID — the <strong>Bot Username</strong> field is filled in automatically.
                 </li>
                 <li>
                   <strong>Save:</strong> Paste the Bot Token here, verify it, then click <strong>"Save Bot Settings"</strong>.
                 </li>
+                <li>
+                  <strong>Connect Staff Members:</strong> Each person clicks <strong>"Connect Telegram"</strong> in the top bar and presses Start in your bot. Alerts are then delivered to their own Telegram chat.
+                </li>
               </ol>
 
               <div className="p-3 bg-white/80 border border-blue-200 rounded-xl text-[11px] text-blue-900">
-                💡 <strong>Note:</strong> While awaiting Telegram Bot token setup, all notifications automatically queue and format inside the <strong>Outbox Activity Log</strong> so your workflow is ready to go.
+                💡 <strong>Note:</strong> While awaiting Telegram Bot token setup, all notifications automatically queue and format inside the <strong>Outbox Activity Log</strong> so your workflow is ready to go. To broadcast to a shared channel as well, add your bot to that group as an Administrator.
               </div>
             </div>
           </div>

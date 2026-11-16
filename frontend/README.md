@@ -1,20 +1,7 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# APA 2 - Staff Report frontend
 
-# Run and deploy your AI Studio app
+Run `npm run dev` to start the local App2 profile at http://localhost:3555. The Vite proxy sends API requests to the backend on port 5812. The frontend loads local settings from the ignored `.env2` file and optional secrets from `.env2.secrets`.
 
-This contains everything you need to run your app locally.
+Run `npm run build` to create the production frontend and server bundle. Run `npm start` to start that bundle, or `npm run serve` to start the single PM2 profile.
 
-View your app in AI Studio: https://ai.studio/apps/3c65eb94-dae3-4fb5-987c-b0660d555120
-
-## Run Locally
-
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+Keep API keys and other credentials in ignored local secret files or the production secret manager. Do not commit credentials.

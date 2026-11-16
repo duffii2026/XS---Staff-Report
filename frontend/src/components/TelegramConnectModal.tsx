@@ -267,7 +267,7 @@ export const TelegramConnectModal: React.FC<TelegramConnectModalProps> = ({
       currentUser.id,
       chatId,
       welcomeMsg,
-      '🚀 Open APA Staff Portal'
+      '🚀 Open APA Staff 1 Portal'
     );
     if (testRes.success && testRes.mode === 'sent') {
       setStatusMessage({
@@ -397,7 +397,7 @@ export const TelegramConnectModal: React.FC<TelegramConnectModalProps> = ({
         currentUser.id,
         liveChatId,
         undefined,
-        '🚀 Open APA Staff Portal'
+        '🚀 Open APA Staff 1 Portal'
       );
       if (res.mode === 'sent') {
         setStatusMessage({
@@ -532,6 +532,9 @@ export const TelegramConnectModal: React.FC<TelegramConnectModalProps> = ({
                   <div className="bg-white/80 p-2.5 rounded-xl border border-slate-200/60 shadow-2xs">
                     <span className="text-[10px] uppercase font-bold text-slate-400 block">Personal Chat ID</span>
                     <span className="font-mono font-bold text-slate-900 text-xs">{liveChatId}</span>
+                    {liveUsername && (
+                      <span className="block text-[10px] text-blue-600 font-medium mt-1">@{liveUsername}</span>
+                    )}
                   </div>
                   <div className="bg-white/80 p-2.5 rounded-xl border border-slate-200/60 shadow-2xs">
                     <span className="text-[10px] uppercase font-bold text-slate-400 block">Bot Channel</span>
@@ -830,13 +833,13 @@ export const TelegramConnectModal: React.FC<TelegramConnectModalProps> = ({
 
                   <div>
                     <label className="block font-bold text-slate-700 text-xs mb-1">
-                      Bot Username <span className="text-slate-400 font-normal">(e.g. @APATaskReportBot)</span>
+                      Bot Username <span className="text-slate-400 font-normal">(e.g. @username_bot)</span>
                     </label>
                     <input
                       type="text"
                       value={botUsernameInput}
                       onChange={e => setBotUsernameInput(e.target.value)}
-                      placeholder="@APATaskReportBot"
+                      placeholder="@Botusername"
                       className="w-full px-3.5 py-2 border border-slate-300 rounded-xl text-xs text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
                     />
                   </div>

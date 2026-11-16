@@ -3,7 +3,7 @@ import {
   ACCESS_COOKIE, REFRESH_COOKIE,
   verifyAccessToken, loadUserWithPerms, publicUser,
   rotateSession, revokeSession, touchSession,
-  setAuthCookies, clearAuthCookies
+  setAuthCookies, setRefreshCookie, clearAuthCookies
 } from '../services/auth.js';
 import { validateApiKey } from '../services/apiKey.js';
 
@@ -38,7 +38,12 @@ export const requireUser = asyncHandler(async (req, res, next) => {
       const user = await loadUserWithPerms(payload.sub);
       if (user) {
         req.user = { ...user, authType: 'cookie', jwtExp: payload.exp };
-        if (refresh) await touchSession(refresh);
+        if (refresh) {
+          // Sliding idle session: activity extends both the DB expiry and the
+          // refresh cookie's browser expiry.
+          const touched = await touchSession(refresh);
+          if (touched) setRefreshCookie(res, refresh);
+        }
         return next();
       }
     }
@@ -52,6 +57,12 @@ export const requireUser = asyncHandler(async (req, res, next) => {
       req.user = { ...rotated.user, authType: 'cookie', refreshed: true };
       return next();
     }
+    // A refresh cookie exists but could not be rotated. This is normally the
+    // loser of a concurrent-rotation race (another request already rotated the
+    // same token). Clearing cookies here would delete the winner's fresh
+    // cookies and force a logout, so leave them intact: the client refreshes
+    // and retries the request once.
+    throw new ApiError(401, 'Not authenticated. Please sign in.');
   }
 
   clearAuthCookies(res);

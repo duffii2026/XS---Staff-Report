@@ -337,7 +337,7 @@ export const PolicyModal: React.FC<PolicyModalProps> = ({
                     <ul className="space-y-1.5 pl-1">
                       <li className="flex items-start gap-1.5">
                         <span className="text-slate-400 font-bold">•</span>
-                        <span><strong>Weekly Tasks (Mandatory — No N/A):</strong> Weekly routine duties must be completed each week. Staff cannot mark weekly tasks as N/A (you must choose either Done or Not Done).</span>
+                        <span><strong>Weekly Tasks:</strong> Weekly routine duties start as Not Done. Staff may choose N/A when a task does not apply to the reporting period.</span>
                       </li>
                       <li className="flex items-start gap-1.5">
                         <span className="text-slate-400 font-bold">•</span>

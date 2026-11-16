@@ -41,6 +41,15 @@ export function setAuthCookies(res, accessToken, refreshToken) {
   res.cookie(REFRESH_COOKIE, refreshToken, cookieOptions(env.SESSION_TTL_MS));
 }
 
+/**
+ * Slide the refresh cookie's browser expiry forward without changing its value.
+ * Called whenever touchSession() extends the DB session so an active user is not
+ * logged out simply because the cookie was last written hours ago.
+ */
+export function setRefreshCookie(res, refreshToken) {
+  res.cookie(REFRESH_COOKIE, refreshToken, cookieOptions(env.SESSION_TTL_MS));
+}
+
 export function clearAuthCookies(res) {
   res.clearCookie(ACCESS_COOKIE, { path: '/' });
   res.clearCookie(REFRESH_COOKIE, { path: '/' });
@@ -110,8 +119,41 @@ export async function createSession(userCode, ip, userAgent) {
 }
 
 // Return: { user, accessToken, refreshToken } after rotation, or null if invalid
+//
+// Refresh rotation is not idempotent by nature: the first request revokes the
+// old token and mints a replacement. If several requests arrive together (a
+// slider save, a hydration reload, a keep-alive), the losers used to get null
+// and force a logout. Remember the replacement for a short grace window so a
+// concurrent caller holding the same old token receives the SAME new tokens.
+const ROTATION_GRACE_MS = 15 * 1000;
+const _recentRotations = new Map();
+
+function pruneRecentRotations() {
+  const cutoff = Date.now() - ROTATION_GRACE_MS;
+  for (const [key, value] of _recentRotations) {
+    if (value.at < cutoff) _recentRotations.delete(key);
+  }
+}
+
 export async function rotateSession(rawRefreshToken, ip) {
   const hash = sha256(rawRefreshToken);
+
+  const recent = _recentRotations.get(hash);
+  if (recent) {
+    if (Date.now() - recent.at <= ROTATION_GRACE_MS) {
+      const recentUser = await loadUserWithPerms(recent.userCode);
+      if (recentUser) {
+        return {
+          user: recentUser,
+          accessToken: recent.accessToken,
+          refreshToken: recent.refreshToken
+        };
+      }
+    } else {
+      _recentRotations.delete(hash);
+    }
+  }
+
   const session = await getOne('SELECT * FROM sessions WHERE token_hash = ?', [hash]);
   if (!session) return null;
   if (session.revoked_at) return null;
@@ -120,34 +162,78 @@ export async function rotateSession(rawRefreshToken, ip) {
   const user = await loadUserWithPerms(session.user_code);
   if (!user) return null;
 
-  // Rotate: revoke old, create new (tokens randomize; hash stored)
-  await insert('UPDATE sessions SET revoked_at = ? WHERE token_hash = ?', [toMySqlDatetime(new Date()), hash]);
+  // Rotate atomically. Two concurrent requests can both read the same valid
+  // refresh token; without the conditional UPDATE they would BOTH rotate it and
+  // the loser would revoke the winner's session. Only the request that actually
+  // flips revoked_at from NULL may mint a replacement session.
+  const revoked = await insert(
+    'UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL',
+    [toMySqlDatetime(new Date()), hash]
+  );
+  if (!revoked?.affectedRows) return null;
+
   const refreshToken = await createSession(user.code, ip, session.user_agent);
   const accessToken = issueAccessToken(user);
+
+  _recentRotations.set(hash, {
+    userCode: user.code,
+    accessToken,
+    refreshToken,
+    at: Date.now()
+  });
+  if (_recentRotations.size > 1000) pruneRecentRotations();
 
   return { user, accessToken, refreshToken };
 }
 
 export async function revokeSession(rawRefreshToken) {
   if (!rawRefreshToken) return;
-  await insert('UPDATE sessions SET revoked_at = ? WHERE token_hash = ?', [toMySqlDatetime(new Date()), sha256(rawRefreshToken)]);
+  const hash = sha256(rawRefreshToken);
+  // Drop any grace-window replay entries that would otherwise hand back a
+  // session after an explicit logout.
+  for (const [key, value] of _recentRotations) {
+    if (key === hash || value.refreshToken === rawRefreshToken) _recentRotations.delete(key);
+  }
+  await insert('UPDATE sessions SET revoked_at = ? WHERE token_hash = ?', [toMySqlDatetime(new Date()), hash]);
 }
 
 const SESSION_TOUCH_WINDOW_MS = 60 * 1000;
 const SESSION_TOUCH_CAP = 5000;
 const _lastSessionTouch = new Map();
 
+/**
+ * Slide the session's idle expiry forward.
+ *
+ * Returns true when the DB row was actually extended, so callers can also
+ * refresh the browser cookie's maxAge. Throttled to one write per minute per
+ * token: an active user can issue many requests, but the session only needs to
+ * move forward periodically. A session that is revoked or already expired is
+ * never revived.
+ */
 export async function touchSession(rawRefreshToken) {
-  if (!rawRefreshToken) return;
+  if (!rawRefreshToken) return false;
   const hash = sha256(rawRefreshToken);
   const now = Date.now();
   const last = _lastSessionTouch.get(hash);
-  if (last && now - last < SESSION_TOUCH_WINDOW_MS) return;
+  if (last && now - last < SESSION_TOUCH_WINDOW_MS) return false;
   if (_lastSessionTouch.size >= SESSION_TOUCH_CAP) {
     _lastSessionTouch.clear();
   }
   _lastSessionTouch.set(hash, now);
-  await insert('UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?', [toMySqlDatetime(new Date()), hash]).catch(() => {});
+  try {
+    const result = await insert(
+      `UPDATE sessions SET last_seen_at = ?, expires_at = ?
+       WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > NOW()`,
+      [
+        toMySqlDatetime(new Date(now)),
+        toMySqlDatetime(new Date(now + env.SESSION_TTL_MS)),
+        hash
+      ]
+    );
+    return (result?.affectedRows || 0) > 0;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------

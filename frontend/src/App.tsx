@@ -20,12 +20,15 @@ import { TelegramWarningBanner } from './components/TelegramWarningBanner';
 import { OnboardingWidget } from './components/OnboardingWidget';
 import { NoticeBoardView } from './components/NoticeBoardView';
 import { DeadlineBanner } from './components/DeadlineBanner';
+import { FileManagerView } from './components/FileManagerView';
 import { LogOut, LogIn, ShieldAlert } from 'lucide-react';
 
 import { LoginForm } from './components/LoginForm';
 import { LoadingScreen } from './components/LoadingScreen';
 import { ForcePasswordChange } from './components/ForcePasswordChange';
-import { GlobalDialog, confirmDialog } from './components/GlobalDialog';
+import { GlobalDialog, confirmDialog, showDialog } from './components/GlobalDialog';
+import { SSOCallback } from './components/SSOCallback';
+import { getSession } from './services/api';
 
 // Keep heavy tab views mounted after first visit so returning to a tab is instant.
 // React.memo ensures hidden views skip re-rendering when App re-renders (e.g. the 10s deadline poll).
@@ -35,6 +38,7 @@ const EvalView = React.memo(PerformanceEvaluation);
 const NoticeView = React.memo(NoticeBoardView);
 const TelegramView = React.memo(TelegramIntegrationView);
 const AdminView = React.memo(AdminConsole);
+const FileManagerViewMemo = React.memo(FileManagerView);
 
 type TrFormRoute = { mode: 'new' | 'edit'; id?: string } | null;
 
@@ -57,8 +61,8 @@ function useTrFormRoute(): TrFormRoute {
   return route;
 }
 
-type AppTab = 'tr' | 'trs' | 'evaluation' | 'admin' | 'telegram' | 'notices';
-const APP_TABS: AppTab[] = ['tr', 'trs', 'evaluation', 'notices', 'admin', 'telegram'];
+type AppTab = 'tr' | 'trs' | 'evaluation' | 'admin' | 'telegram' | 'notices' | 'files';
+const APP_TABS: AppTab[] = ['tr', 'trs', 'evaluation', 'notices', 'files', 'admin', 'telegram'];
 const ACTIVE_TAB_KEY = 'apa_active_tab';
 
 export default function App() {
@@ -82,6 +86,17 @@ export default function App() {
       setActiveTab(tab);
     });
   };
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { tab?: AppTab } | undefined;
+      if (detail?.tab && (APP_TABS as string[]).includes(detail.tab)) {
+        goToTab(detail.tab);
+      }
+    };
+    window.addEventListener('apa:navigate-tab', handler as EventListener);
+    return () => window.removeEventListener('apa:navigate-tab', handler as EventListener);
+  }, []);
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [telegramModalOpen, setTelegramModalOpen] = useState<boolean>(false);
   const [deadlineAlerts, setDeadlineAlerts] = useState<TaskDeadlineAlert[]>([]);
@@ -93,6 +108,11 @@ export default function App() {
   // renders the app shell immediately; content appears when the sync lands).
   const [viewsEligible, setViewsEligible] = useState(false);
   const trFormRoute = useTrFormRoute();
+
+  // Handle SSO callback: /sso/callback?token=xxx&returnTo=xxx
+  if (window.location.pathname === '/sso/callback') {
+    return <SSOCallback />;
+  }
 
   const refreshDeadlineAlerts = () => {
     if (currentUser) {
@@ -144,7 +164,7 @@ export default function App() {
           setDeadlineAlerts(alerts);
         }
       } catch (err: any) {
-        if (mounted) setBootError(err?.message || 'Unable to reach the backend on port 5811.');
+        if (mounted) setBootError(err?.message || 'Unable to reach the backend on port 5812.');
       }
     })();
     return () => {
@@ -157,6 +177,68 @@ export default function App() {
     const interval = setInterval(refreshDeadlineAlerts, 10000);
     return () => clearInterval(interval);
   }, [currentUser, activeTab]);
+
+  // Repair malformed entry URLs such as "/%20updated%20b.#/tr". The hash route
+  // still works, but a non-root pathname can confuse relative requests/reloads.
+  useEffect(() => {
+    const path = window.location.pathname;
+    if (path && path !== '/' && path !== '/sso/callback') {
+      const hash = window.location.hash.startsWith('#/') ? window.location.hash : '#/';
+      window.history.replaceState(null, '', `/${hash}`);
+    }
+  }, []);
+
+  // The API layer emits this once when a request still returns 401 after its
+  // single silent-refresh retry. Show a non-dismissible dialog; OK reloads so
+  // the app boots into the login screen with clean cookies.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      setAuthModalOpen(false);
+      showDialog(
+        'Your session has expired due to inactivity. Please sign in again to continue.',
+        {
+          title: 'Session Expired',
+          kind: 'warning',
+          dismissible: false,
+          onConfirm: () => window.location.reload()
+        }
+      );
+    };
+    window.addEventListener('apa:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('apa:unauthorized', onUnauthorized);
+  }, []);
+
+  // Sliding 24h idle session: while the user is active, ping /auth/session at
+  // most every 5 minutes so the backend extends expires_at and the cookie.
+  useEffect(() => {
+    if (!currentUser) return;
+    const HEARTBEAT_MS = 5 * 60 * 1000;
+    let lastActivity = Date.now();
+    let lastPing = Date.now();
+    const markActivity = () => { lastActivity = Date.now(); };
+    const events = ['mousedown', 'mousemove', 'keydown', 'touchstart', 'scroll'];
+    events.forEach((name) => window.addEventListener(name, markActivity, { passive: true }));
+    const interval = setInterval(() => {
+      const now = Date.now();
+      if (document.visibilityState === 'hidden') return;
+      if (now - lastActivity > HEARTBEAT_MS) return;
+      if (now - lastPing < HEARTBEAT_MS) return;
+      lastPing = now;
+      getSession()
+        .then((session) => {
+          // /auth/session answers 200 with a null user when the refresh session
+          // is gone, so detect that here instead of waiting for the next 401.
+          if (!(session as { user?: unknown } | null)?.user) {
+            window.dispatchEvent(new CustomEvent('apa:unauthorized'));
+          }
+        })
+        .catch(() => { /* network error: keep the session */ });
+    }, 60 * 1000);
+    return () => {
+      events.forEach((name) => window.removeEventListener(name, markActivity));
+      clearInterval(interval);
+    };
+  }, [currentUser]);
 
   const handleUserSwitch = (newUser: User) => {
     const wasLoggedOut = !currentUser;
@@ -188,6 +270,8 @@ export default function App() {
         return user.role === 'admin'; // or hasUserPermission(user, 'manageTemplates')
       case 'notices':
         return true; // all authenticated users can view notices
+      case 'files':
+        return true; // all authenticated users can see their own and subordinate files
       case 'admin':
         return hasUserPermission(user, 'manageUsers') || hasUserPermission(user, 'manageTemplates') || hasUserPermission(user, 'viewAuditLogs');
       default:
@@ -273,11 +357,14 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col font-sans">
-      {hydrateStatus === 'loading' && (
-        <div className="bg-white border-b border-slate-200 text-[11px] font-medium text-slate-500 px-4 py-1.5 flex items-center justify-center gap-2">
-          <span className="inline-block w-2.5 h-2.5 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
-          Syncing data with secure backend…
-        </div>
+      {hydrateStatus === 'loading' && !viewsEligible && (
+        <>
+          <div className="fixed top-0 inset-x-0 z-[70] h-6 bg-white/95 backdrop-blur border-b border-slate-200 text-[11px] font-medium text-slate-500 px-4 flex items-center justify-center gap-2 shadow-sm">
+            <span className="inline-block w-2.5 h-2.5 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+            Syncing data with secure backend…
+          </div>
+          <div className="h-6 shrink-0" aria-hidden="true" />
+        </>
       )}
       <Navbar
         activeTab={activeTab}
@@ -312,7 +399,9 @@ export default function App() {
         />
 
         {visitedTabs.has('tr') && canAccessTab(currentUser!, 'tr') && (
-          <div className={activeTab === 'tr' ? '' : 'hidden'}><TRView currentUser={currentUser} /></div>
+          <div className={activeTab === 'tr' ? '' : 'hidden'}>
+            <TRView currentUser={currentUser} isActive={activeTab === 'tr'} />
+          </div>
         )}
         {visitedTabs.has('trs') && canAccessTab(currentUser!, 'trs') && (
           <div className={activeTab === 'trs' ? '' : 'hidden'}><TRSView currentUser={currentUser} /></div>
@@ -322,6 +411,9 @@ export default function App() {
         )}
         {visitedTabs.has('notices') && canAccessTab(currentUser!, 'notices') && (
           <div className={activeTab === 'notices' ? '' : 'hidden'}><NoticeView currentUser={currentUser} /></div>
+        )}
+        {visitedTabs.has('files') && canAccessTab(currentUser!, 'files') && (
+          <div className={activeTab === 'files' ? '' : 'hidden'}><FileManagerViewMemo currentUser={currentUser} /></div>
         )}
         {visitedTabs.has('telegram') && currentUser && canAccessTab(currentUser, 'telegram') && (
           <div className={activeTab === 'telegram' ? '' : 'hidden'}><TelegramView currentUser={currentUser} /></div>
@@ -342,7 +434,7 @@ export default function App() {
 
       <footer className="bg-white border-t border-slate-200 text-slate-500 text-xs py-4 px-6 text-center mb-16 md:mb-0">
         <p>
-          APA {import.meta.env.VITE_APP ?? '1'} - Staff Report • Centralized T&R / TRS Weekly Reporting & Evaluation Platform
+          APA 2 - Staff Report | Centralized T&R / TRS Weekly Reporting & Evaluation Platform
         </p>
       </footer>
 

@@ -11,7 +11,7 @@ import {
   ChecklistItem, SubmittedChecklistItem, NotificationItem, AppraisalRecord, SignatureData,
   UserRole, MultiProofData, ScoreDispute, TRSTaskComment, AnnouncementNotice,
   NoticeReadReceipt, OnboardingStatus, UnlockAuditTrail, TRSExtensionRequest,
-  ChecklistItemStatus, OrgConfigEntry, OrgConfigKind
+  ChecklistItemStatus, OrgConfigEntry, OrgConfigKind, WeeklySummary
 } from '../types';
 import { api, getSession, logout, resolveSignature } from './api';
 import { normalizeFrequency, DEFAULT_FREQUENCY, defaultItemStatus } from '../utils/checklistFrequency';
@@ -62,11 +62,15 @@ let _orgConfig: OrgConfigEntry[] = [];
 let _orgConfigLoaded = false;
 let _currentUser: User | null = null;
 let _hydratePromise: Promise<void> | null = null;
+let _hydrateToken = 0;
+let _reloadPromise: Promise<void> | null = null;
+let _reloadPending = false;
 const _orgConfigListeners = new Set<() => void>();
 
 interface DraftCacheEntry {
   checklistItems: SubmittedChecklistItem[];
   notes?: string;
+  summary?: WeeklySummary;
   signature?: SignatureData;
   multiProof?: MultiProofData;
   lastSavedAt?: string;
@@ -367,12 +371,14 @@ function notifyHydration(status: HydrateStatus) {
   _hydrateListeners.forEach((l) => { try { l(status); } catch { /* ignore */ } });
 }
 
-async function fetchCached<T>(key: string, pull: () => Promise<T>, set: (v: T) => void) {
+async function fetchCached<T>(key: string, pull: () => Promise<T>, set: (v: T) => void, token?: number) {
   let lastErr: any;
   for (let attempt = 1; attempt <= HYDRATE_MAX_ATTEMPTS; attempt++) {
     try {
       const rows = await pull();
-      set(rows);
+      // A newer hydration (e.g. a progress save that triggered reloadStorage)
+      // must win: never let an older, slower request overwrite fresher data.
+      if (token === undefined || token === _hydrateToken) set(rows);
       return;
     } catch (err: any) {
       lastErr = err;
@@ -397,21 +403,23 @@ async function hydrateSession(): Promise<void> {
       _currentUser = null;
     }
   } catch {
-    _currentUser = null;
+    // Transient network/timeout failure: keep the user we already have instead
+    // of blanking the session. A real expiry surfaces via the api layer's 401
+    // retry and the global "Session Expired" dialog.
   }
 }
 
-async function hydrateData(): Promise<void> {
+async function hydrateData(token: number): Promise<void> {
   const p = _currentUser?.permissions;
 
   const tasks: Promise<void>[] = [
-    fetchCached('users', () => api.get<any[]>('/users').then((rows) => rows.map((r) => adaptUser(r, r.permissions))), (v) => { _users = v; }),
-    fetchCached('templates', () => api.get<any[]>('/templates').then((rows) => rows.map(adaptTemplate)), (v) => { _templates = v; }),
-    fetchCached('reports', () => api.get<any[]>('/reports').then((rows) => rows.map(adaptReport)), (v) => { _reports = v; }),
-    fetchCached('trs', () => api.get<any[]>('/trs').then((rows) => rows.map(adaptTRS)), (v) => { _trs = v; }),
-    fetchCached('signatures', () => getSavedSignaturesFromApi(), (v) => { _signatures = v; }),
-    fetchCached('notices', () => api.get<any[]>('/notices').then((rows) => rows.map(adaptNotice)), (v) => { _notices = v; }),
-    fetchCached('notifications', () => api.get<any[]>('/notifications').then((rows) => rows.map(adaptNotification)), (v) => { _notifications = v; }),
+    fetchCached('users', () => api.get<any[]>('/users').then((rows) => rows.map((r) => adaptUser(r, r.permissions))), (v) => { _users = v; }, token),
+    fetchCached('templates', () => api.get<any[]>('/templates').then((rows) => rows.map(adaptTemplate)), (v) => { _templates = v; }, token),
+    fetchCached('reports', () => api.get<any[]>('/reports').then((rows) => rows.map(adaptReport)), (v) => { _reports = v; }, token),
+    fetchCached('trs', () => api.get<any[]>('/trs').then((rows) => rows.map(adaptTRS)), (v) => { _trs = v; }, token),
+    fetchCached('signatures', () => getSavedSignaturesFromApi(), (v) => { _signatures = v; }, token),
+    fetchCached('notices', () => api.get<any[]>('/notices').then((rows) => rows.map(adaptNotice)), (v) => { _notices = v; }, token),
+    fetchCached('notifications', () => api.get<any[]>('/notifications').then((rows) => rows.map(adaptNotification)), (v) => { _notifications = v; }, token),
     // Master department/position lists. Uses its own try/catch inside
     // refreshOrgConfig so a missing migrate_v5.sql doesn't fail the whole boot.
     (async () => { await refreshOrgConfig(); })()
@@ -421,9 +429,9 @@ async function hydrateData(): Promise<void> {
   // so logins don't wait on endpoints that would 401/403 anyway.
   // All roles can open the Performance Evaluation tab; the endpoint scopes each
   // user to their own appraisal plus their subordinates.
-  tasks.push(fetchCached('appraisals', () => api.get<any[]>('/appraisals').then((rows) => rows.map(adaptAppraisal)), (v) => { _appraisals = v; }));
+  tasks.push(fetchCached('appraisals', () => api.get<any[]>('/appraisals').then((rows) => rows.map(adaptAppraisal)), (v) => { _appraisals = v; }, token));
   if (p?.viewAuditLogs) {
-    tasks.push(fetchCached('audit', () => api.get<{ rows: any[] }>('/audit?limit=100').then((d) => d.rows.map(adaptLog)), (v) => { _logs = v; }));
+    tasks.push(fetchCached('audit', () => api.get<{ rows: any[] }>('/audit?limit=100').then((d) => d.rows.map(adaptLog)), (v) => { _logs = v; }, token));
   }
   if (p?.submitTRReport) {
     tasks.push(fetchCached('drafts', () => api.get<any[]>('/reports/drafts').then((rows) => {
@@ -433,26 +441,28 @@ async function hydrateData(): Promise<void> {
         map[key] = {
           checklistItems: Array.isArray(r.draft?.checklistItems) ? r.draft.checklistItems : [],
           notes: r.draft?.notes,
+          summary: r.draft?.summary,
           signature: r.draft?.signature,
           multiProof: r.draft?.multiProof,
           lastSavedAt: r.last_saved_at || r.lastSavedAt
         };
       }
       return map;
-    }), (v) => { _trDrafts = v; }));
+    }), (v) => { _trDrafts = v; }, token));
   }
 
   await Promise.all(tasks);
 }
 
 async function hydrate(): Promise<void> {
+  const token = ++_hydrateToken;
   await hydrateSession();
 
   // Guests can't reach any data endpoint (401/403) — the login page only
   // needs the session check, so skip the rest to make boot near-instant.
   if (!_currentUser) return;
 
-  await hydrateData();
+  await hydrateData(token);
 
   // Run the auto-lock scan on every login/open (staff scan their own tasks,
   // admin/HR/executive scan all) and refresh the TRS cache so newly locked
@@ -462,7 +472,7 @@ async function hydrate(): Promise<void> {
     try {
       await api.post<{ locked?: number }>('/trs/scan-lock');
       const rows = await api.get<any[]>('/trs');
-      _trs = rows.map(adaptTRS);
+      if (token === _hydrateToken) _trs = rows.map(adaptTRS);
     } catch { /* non-blocking */ }
   })();
 }
@@ -496,15 +506,35 @@ export function initStorage(): Promise<void> {
     })();
     // release the resolved promise so getters during boot don't block
     const p = _hydratePromise;
-    const reset = () => { _hydratePromise = null; };
+    const reset = () => { if (_hydratePromise === p) _hydratePromise = null; };
     p.then(reset, reset);
   }
   return _hydratePromise;
 }
 
-export async function reloadStorage(): Promise<void> {
-  _hydratePromise = null;
-  return initStorage();
+/**
+ * Re-hydrate after a mutation, collapsing bursts into at most one extra pass.
+ * While a reload is running, later calls set a pending flag instead of starting
+ * another hydration; the running loop repeats once so the last mutation is
+ * always reflected, and every caller awaits the same promise.
+ */
+export function reloadStorage(): Promise<void> {
+  if (_reloadPromise) {
+    _reloadPending = true;
+    return _reloadPromise;
+  }
+  const run = async () => {
+    do {
+      _reloadPending = false;
+      _hydratePromise = null;
+      await initStorage();
+    } while (_reloadPending);
+  };
+  const p = run();
+  _reloadPromise = p;
+  const reset = () => { if (_reloadPromise === p) _reloadPromise = null; };
+  p.then(reset, reset);
+  return p;
 }
 
 // Consolidated cache getters (sync — components rely on sync reads after boot)
@@ -553,6 +583,20 @@ export async function refreshUsers(): Promise<void> {
   try {
     const rows = await api.get<any[]>('/users');
     _users = rows.map((r) => adaptUser(r, r.permissions));
+  } catch { /* keep current local copy on failure */ }
+}
+
+/**
+ * Re-pull only the T&R reports list from the backend.
+ * Targeted refresh used when the T&R tab is re-activated: the view stays
+ * mounted (hidden) across tab switches, so without this the list can show
+ * stale or missing rows until a full page reload. Unlike reloadStorage() this
+ * does NOT re-check the session or touch any other dataset.
+ */
+export async function refreshReports(): Promise<void> {
+  try {
+    const rows = await api.get<any[]>('/reports');
+    _reports = rows.map(adaptReport);
   } catch { /* keep current local copy on failure */ }
 }
 
@@ -925,7 +969,7 @@ export function getVisibleReportsForUser(currentUser: User): WeeklyReport[] {
   );
 }
 
-export async function saveReport(report: WeeklyReport, currentUser: User, source?: 'superior' | undefined): Promise<{ ok: boolean; conflict?: boolean; message?: string }> {
+export async function saveReport(report: WeeklyReport, currentUser: User, source?: 'superior' | undefined): Promise<{ ok: boolean; conflict?: boolean; message?: string; code?: string }> {
   const idx = _reports.findIndex((r) => r.id === report.id);
   if (idx !== -1) _reports[idx] = report;
   else _reports.unshift(report);
@@ -935,6 +979,10 @@ export async function saveReport(report: WeeklyReport, currentUser: User, source
     const body: Record<string, unknown> = {
       checklist_items: report.checklistItems,
       notes: report.notes,
+      // AI Executive Weekly Summary — persisted so it survives a reload and
+      // shows on the report detail. Never sent before, which is why generated
+      // summaries vanished after refresh.
+      ai_summary: report.aiSummary ?? null,
       signature,
       week_number: report.weekNumber,
       year: report.year,
@@ -1019,7 +1067,10 @@ export async function saveReport(report: WeeklyReport, currentUser: User, source
       });
     }
     await reloadStorage();
-    return { ok: true };
+    // `code` is the server-assigned report code — new reports get it from the
+    // create call above, existing ones keep their own id. Callers need it to
+    // attach side-table records (e.g. the Weekly Summary Form).
+    return { ok: true, code: report.id };
   } catch (e: any) {
     if (e?.status === 409) {
       // Duplicate report rejected by the server — remove the optimistic local entry
@@ -1031,6 +1082,36 @@ export async function saveReport(report: WeeklyReport, currentUser: User, source
       console.error('saveReport:', e?.message || e);
     }
     return { ok: false, message: e?.message || 'Failed to save report.' };
+  }
+}
+
+// ---------------------------------------------------------------
+// Weekly Summary Form (Sections A-J) — own table `tr_weekly_summaries`,
+// keyed by report code. Never stored as columns on `reports`.
+// ---------------------------------------------------------------
+export async function saveWeeklySummary(
+  reportCode: string,
+  summary: WeeklySummary
+): Promise<{ ok: boolean; message?: string }> {
+  try {
+    await api.put(`/reports/${reportCode}/summary`, { summary });
+    return { ok: true };
+  } catch (e: any) {
+    if (e?.status !== 401 && e?.status !== 403) {
+      console.error('saveWeeklySummary:', e?.message || e);
+    }
+    return { ok: false, message: e?.message || 'Failed to save the weekly summary.' };
+  }
+}
+
+export async function fetchWeeklySummary(reportCode: string): Promise<WeeklySummary | null> {
+  try {
+    const res = await api.get<{ summary: WeeklySummary | null }>(
+      `/reports/${reportCode}/summary`
+    );
+    return res?.summary || null;
+  } catch {
+    return null;
   }
 }
 
@@ -1206,14 +1287,18 @@ export function deleteTRSTask(taskId: string, actingUser: User): { success: bool
   const target = _trs.find((t) => t.id === taskId);
   if (!target) return { success: false, error: 'Task not found' };
   // Authorization: self-assigned owner can delete; if assigned by superior, only superiors can delete
+  if (['admin', 'executive', 'hr'].includes(actingUser.role)) {
+    _trs = _trs.filter((t) => t.id !== taskId);
+    api.del(`/trs/${taskId}`).catch((e) => console.error('deleteTRSTask:', e));
+    return { success: true };
+  }
   const isSelfAssigned = target.assignedBy === target.assignedTo && target.assignedTo === actingUser.id;
   const isAssigneeButNotSelfAssigned = target.assignedTo === actingUser.id && !isSelfAssigned;
   if (isAssigneeButNotSelfAssigned) {
     return { success: false, error: `Permission Denied: Only a superior (the delegating superior, an Admin, or the assignee's superior) can delete this task.` };
   }
   const isAuthorized = isSelfAssigned ||
-    (['admin', 'executive', 'hr'].includes(actingUser.role) ||
-      target.assignedBy === actingUser.id ||
+    (target.assignedBy === actingUser.id ||
       getSubordinateUserIds(actingUser.id).has(target.assignedTo));
   if (!isAuthorized) return { success: false, error: `Permission Denied: Only a superior (the delegating superior, an Admin, or the assignee's superior) can delete this task.` };
   _trs = _trs.filter((t) => t.id !== taskId);
@@ -1329,6 +1414,7 @@ export async function saveTRSTask(task: TRSTask, actingUser: User, intent: TRSSa
     } else {
       await api.put(`/trs/${normalizedTask.id}`, {
         title: normalizedTask.title,
+        assigned_date: normalizedTask.assignedDate,
         progress: normalizedTask.progress,
         completion_date: normalizedTask.completionDate,
         staff_remarks: normalizedTask.staffRemarks,
@@ -1350,6 +1436,62 @@ export async function saveTRSTask(task: TRSTask, actingUser: User, intent: TRSSa
 }
 
 /**
+ * Create a TRS task on the server and return the persisted row.
+ *
+ * Unlike saveTRSTask(), this does NOT insert the task into the cache before the
+ * POST succeeds. A newly created task used to appear in the table with a
+ * temporary local id; changing its progression before POST /trs finished then
+ * failed with 404 "Task not found." Callers should show an "uploading" state
+ * until this promise resolves.
+ */
+export async function createTRSTask(task: TRSTask, actingUser: User): Promise<TRSTask> {
+  const prog = Math.min(100, Math.max(0, Math.round(Number(task.progress) || 0)));
+  const res = await api.post<{ code: string }>('/trs', {
+    title: task.title,
+    description: task.description,
+    assigned_to: task.assignedTo,
+    assigned_by: task.assignedBy || actingUser.id,
+    assigned_date: task.assignedDate,
+    deadline: task.deadline,
+    task_code: task.code,
+    project: task.project,
+    priority: task.priority || 'Medium',
+    progress: prog,
+    instructions: task.instructions,
+    scope: task.scope,
+    quality_criteria: task.qualityCriteria,
+    department: task.department
+  });
+
+  const created: TRSTask = {
+    ...task,
+    id: res.code,
+    progress: prog,
+    status: 'Pending'
+  };
+
+  try {
+    await refreshTRSTasks();
+    return _trs.find((t) => t.id === res.code) || created;
+  } catch {
+    // The POST succeeded, so never surface a create failure just because the
+    // follow-up refresh failed. Keep the row locally until the next load.
+    _trs = [created, ..._trs.filter((t) => t.id !== created.id)];
+    return created;
+  }
+}
+
+/**
+ * Refresh only the TRS task cache. Used after progress edits so the slider does
+ * not trigger a full hydration (users, reports, notices, notifications…) for
+ * every queued save.
+ */
+export async function refreshTRSTasks(): Promise<void> {
+  const rows = await api.get<any[]>('/trs');
+  _trs = rows.map(adaptTRS);
+}
+
+/**
  * Persist a Task Progression change.
  *
  * Deliberately does NOT go through saveTRSTask(): that helper infers intent from
@@ -1364,7 +1506,22 @@ export async function saveTRSTask(task: TRSTask, actingUser: User, intent: TRSSa
  */
 export async function updateTRSTaskProgress(taskCode: string, progress: number): Promise<void> {
   const p = Math.min(100, Math.max(0, Math.round(Number(progress) || 0)));
-  await api.post(`/trs/${taskCode}/progress`, { progress: p });
+  await api.post(`/trs/${taskCode}/progress`, { progress: p }, { timeout: 15000 });
+
+  // Keep the cache correct even if the follow-up GET fails.
+  const idx = _trs.findIndex((t) => t.id === taskCode);
+  if (idx !== -1) {
+    _trs[idx] = {
+      ..._trs[idx],
+      progress: p,
+      status: p === 0 ? 'Pending' : 'In Progress'
+    };
+  }
+  try {
+    await refreshTRSTasks();
+  } catch {
+    // Optimistic cache entry above remains; the next load will reconcile.
+  }
 }
 
 /**
@@ -1455,6 +1612,25 @@ export function clearNotificationsForUser(userId: string) {
 // ---------------------------------------------------------------
 export function getActivityLogs(): ActivityLog[] {
   return _logs;
+}
+
+/**
+ * Pull the audit trail from the server, optionally scoped to one calendar year.
+ * The boot hydration only caches the 100 most recent rows, so the Admin Console
+ * uses this to load a full year on demand.
+ */
+export async function fetchActivityLogs(opts: { year?: number } = {}): Promise<ActivityLog[]> {
+  const params = new URLSearchParams();
+  if (opts.year) {
+    params.set('year', String(opts.year));
+    params.set('limit', '5000'); // a whole year must not be truncated
+  } else {
+    params.set('limit', '1000');
+  }
+  const d = await api.get<{ rows: any[] }>(`/audit?${params.toString()}`);
+  const rows = (d.rows || []).map(adaptLog);
+  _logs = rows;
+  return rows;
 }
 
 export function addActivityLog(userId: string, username: string, userRole: string, action: string, details: string) {
@@ -1643,6 +1819,7 @@ export function getStaffActiveTaskCount(staffId: string): {
 export function getTRDraft(userId: string, year: number, weekNumber: number): {
   checklistItems: SubmittedChecklistItem[];
   notes?: string;
+  summary?: WeeklySummary;
   signature?: SignatureData;
   multiProof?: MultiProofData;
   lastSavedAt: string;
@@ -1653,6 +1830,7 @@ export function getTRDraft(userId: string, year: number, weekNumber: number): {
   return {
     checklistItems: cache.checklistItems || [],
     notes: cache.notes,
+    summary: cache.summary,
     signature: cache.signature,
     multiProof: cache.multiProof,
     lastSavedAt: cache.lastSavedAt || new Date().toISOString()
@@ -1715,7 +1893,7 @@ export function saveTRDraft(
   userId: string,
   year: number,
   weekNumber: number,
-  draftData: { checklistItems: SubmittedChecklistItem[]; notes?: string; signature?: SignatureData; multiProof?: MultiProofData }
+  draftData: { checklistItems: SubmittedChecklistItem[]; notes?: string; summary?: WeeklySummary; signature?: SignatureData; multiProof?: MultiProofData }
 ): void {
   const key = `${userId}_${year}_${weekNumber}`;
   const lastSavedAt = new Date().toISOString();

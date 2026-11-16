@@ -25,6 +25,8 @@ export const DEFAULT_TELEGRAM_CONFIG: TelegramConfig = {
     notifyAppraisalApproved: true
   },
   userTelegramHandles: {},
+  webhookSecret: '',
+  webhookUrl: '',
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString()
 };
@@ -42,7 +44,9 @@ export async function fetchTelegramConfig(): Promise<TelegramConfig> {
       botUsername: cfg.bot_username || '',
       mainGroupChatId: cfg.main_group_chat_id || '',
       channelName: cfg.channel_name || DEFAULT_TELEGRAM_CONFIG.channelName,
-      userTelegramHandles: storedHandles
+      userTelegramHandles: storedHandles,
+      webhookSecret: cfg.webhook_secret || '',
+      webhookUrl: cfg.main_group_chat_id ? `https://api.telegram.org/bot${cfg.bot_token}/setWebhook?url=${encodeURIComponent(cfg.main_group_chat_id)}` : ''
     };
     if (cfg.triggers !== undefined && cfg.triggers !== null) {
       // DB stores either an object map { notifyX: true } or an array [{ key, event }]
@@ -218,7 +222,7 @@ export function getTelegramButtonText(eventType: TelegramOutboxMessage['eventTyp
     case 'APPRAISAL_PENDING': return '✍️ Review Staff Appraisal';
     case 'APPRAISAL_APPROVED': return '🏆 View Approved Appraisal';
     case 'TEST_MESSAGE':
-    default: return '🚀 Open APA Staff Portal';
+    default: return '🚀 Open APA Staff 1 Portal';
   }
 }
 
@@ -301,7 +305,7 @@ export async function sendPersonalTestMessage(
   userId: string,
   targetChatId: string,
   customText?: string,
-  buttonText: string = '🚀 Open APA Staff Portal'
+  buttonText: string = '🚀 Open APA Staff 1 Portal'
 ): Promise<{ success: boolean; mode: 'sent' | 'simulated' | 'failed'; message: string }> {
   void buttonText;
   const text = customText || '🔔 <b>TEST ALERT: APA NOTIFICATIONS ACTIVE</b>';

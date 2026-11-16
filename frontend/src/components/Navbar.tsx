@@ -26,14 +26,15 @@ import {
   LogIn,
   AlertTriangle,
   Bot,
-  Megaphone
+  Megaphone,
+  FolderOpen
 } from 'lucide-react';
 import { TelegramConnectModal } from './TelegramConnectModal';
 import { PolicyModal } from './PolicyModal';
 
 interface NavbarProps {
-  activeTab: 'tr' | 'trs' | 'evaluation' | 'admin' | 'telegram' | 'notices';
-  setActiveTab: (tab: 'tr' | 'trs' | 'evaluation' | 'admin' | 'telegram' | 'notices') => void;
+  activeTab: 'tr' | 'trs' | 'evaluation' | 'admin' | 'telegram' | 'notices' | 'files';
+  setActiveTab: (tab: 'tr' | 'trs' | 'evaluation' | 'admin' | 'telegram' | 'notices' | 'files') => void;
   currentUser: User | null;
   onOpenAuthModal: () => void;
   onLogout: () => void;
@@ -124,20 +125,19 @@ export const Navbar: React.FC<NavbarProps> = ({
   };
 
   if (!currentUser) return null;
-  const mode = import.meta.env.VITE_APP ?? '1';
   return (
     <header className="bg-white border-b border-slate-200 text-slate-800 sticky top-0 z-30 shadow-xs">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 z-10">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
           {/* System Title */}
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow-xs font-bold text-sm tracking-wider">
-              APA
+            <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-xs font-bold text-[18px] tracking-wider">
+              XS
             </div>
             <div>
               <h1 className="font-bold text-base sm:text-lg tracking-tight text-slate-900">
                 
-                APA {mode} - Staff Report
+                Staff Report
               </h1>
             </div>
           </div>
@@ -407,6 +407,17 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </button>
 
+            <button
+              onClick={() => setActiveTab('files')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap ${
+                activeTab === 'files'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+              }`}
+            >
+              <FolderOpen className="w-4 h-4" /> File Manager
+            </button>
+
             {currentUser.role === 'admin' && (
               <button
                 onClick={() => setActiveTab('telegram')}
@@ -487,6 +498,16 @@ export const Navbar: React.FC<NavbarProps> = ({
                   {unreadNotices > 9 ? '9+' : unreadNotices}
                 </span>
               )}
+            </button>
+
+            <button
+              onClick={() => setActiveTab('files')}
+              className={`flex-1 flex flex-col items-center justify-center gap-1 py-2 min-w-0 transition-colors ${
+                activeTab === 'files' ? 'text-blue-600' : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              <FolderOpen className="w-5 h-5 shrink-0" />
+              <span className="text-[9px] font-bold leading-none tracking-tight truncate max-w-full">Files</span>
             </button>
 
             {currentUser.role === 'admin' && (

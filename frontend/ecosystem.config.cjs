@@ -1,10 +1,10 @@
 const root = __dirname;
 
-function frontendApp(n, dist) {
+function frontendApp() {
   return {
-    name: `stf_report_${n}`,
+    name: 'apa2-staff-report',
     cwd: root,
-    script: `${dist}/server.cjs`,
+    script: 'dist/server.cjs',
     instances: 1,
     exec_mode: 'fork',
     watch: [dist],
@@ -13,11 +13,11 @@ function frontendApp(n, dist) {
     max_memory_restart: '512M',
     env: {
       NODE_ENV: 'production',
-      ENV_FILE: `.env${n}`
+      ENV_FILE: '.env2'
     }
   };
 }
 
 module.exports = {
-  apps: [frontendApp(1, 'dist'), frontendApp(2, 'dist2'), frontendApp(3, 'dist3')]
+  apps: [frontendApp()]
 };

@@ -4,7 +4,7 @@
 -- Replaces the hardcoded DEPARTMENTS / COMPANY_POSITIONS arrays
 -- (frontend/src/data/mockData.ts) with admin-editable rows.
 -- NOTE: no USE statement here — migrate.js already selects the
--- active database (supports both apastaffreport & apastaffreport2222).
+-- configured APA 2 database.
 -- Applied idempotently by scripts/migrate.js
 -- ============================================================
 

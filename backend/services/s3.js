@@ -1,16 +1,49 @@
 import {
   S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand
 } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { fromIni } from '@aws-sdk/credential-provider-ini';
 import { nanoid } from 'nanoid';
+import fs from 'fs';
 import { env } from '../config/env.js';
 import { ApiError } from '../utils/http.js';
+
+/**
+ * Credentials for this instance.
+ * - If no AWS_SHARED_CREDENTIALS_FILE is configured, use the default provider chain
+ *   (~/.aws/credentials → env vars → IAM role).
+ * - APP2: its own credentials file + profile (AWS_SHARED_CREDENTIALS_FILE / AWS_PROFILE).
+ *   If that file is missing on the machine (Windows path on a Linux server, etc.),
+ *   the override is dropped here too and the default chain is used instead of throwing.
+ */
+export function resolveS3Credentials() {
+  const filepath = env.AWS_SHARED_CREDENTIALS_FILE;
+  if (!filepath) return undefined;
+  if (!fs.existsSync(filepath)) {
+    console.warn(`[S3] credentials file not found (${filepath}); using default AWS credential chain`);
+    return undefined;
+  }
+  return fromIni({ filepath, profile: env.AWS_PROFILE || undefined });
+}
 
 let _client = null;
 export function getS3() {
   if (!_client) {
-    // Default credential provider chain reads ~/.aws/credentials (or IAM role on EC2).
-    _client = new S3Client({ region: env.AWS_REGION });
+    const credentials = resolveS3Credentials();
+    _client = new S3Client({
+      region: env.AWS_REGION,
+      ...(credentials ? { credentials } : {}),
+      // Large proof files (up to 30 MB) must not be cut off mid-upload:
+      // a 10-minute request window instead of the SDK default, plus
+      // automatic retries so a transient S3 hiccup surfaces as a retry,
+      // not a 500 to the browser.
+      requestHandler: new NodeHttpHandler({
+        requestTimeout: 10 * 60 * 1000,
+        connectionTimeout: 30 * 1000
+      }),
+      maxAttempts: 4
+    });
   }
   return _client;
 }
@@ -61,6 +94,23 @@ export async function presignGet(key, expiresIn = env.AWS_S3_SIGN_EXPIRY_S) {
   }
 }
 
+/**
+ * S3 object metadata travels as HTTP headers, so a value must be printable
+ * ASCII and free of CR/LF/control characters — otherwise the whole upload dies
+ * with `Invalid character in header content ["x-amz-meta-filename"]`.
+ * Real-world filenames are not: "รายงาน.pdf" (Khmer), CJK, emoji, or a stray
+ * newline are all valid on disk but illegal in a header.
+ *
+ * Printable-ASCII names are passed through untouched so ordinary filenames stay
+ * readable; anything else is percent-encoded, which is 100% ASCII and losslessly
+ * reversible. (Metadata is informational here — the true filename is stored in
+ * the DB / returned to the client.)
+ */
+function headerSafeMeta(value) {
+  const s = String(value);
+  return /^[\x20-\x7E]*$/.test(s) ? s : encodeURIComponent(s);
+}
+
 export async function uploadBuffer(key, buffer, contentType, metadata = {}) {
   try {
     const cmd = new PutObjectCommand({
@@ -69,7 +119,9 @@ export async function uploadBuffer(key, buffer, contentType, metadata = {}) {
       Body: buffer,
       ContentType: contentType,
       Metadata: Object.fromEntries(
-        Object.entries(metadata).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])
+        Object.entries(metadata)
+          .filter(([, v]) => v != null)
+          .map(([k, v]) => [k, headerSafeMeta(v)])
       )
     });
     await getS3().send(cmd);

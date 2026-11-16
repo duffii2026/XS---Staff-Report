@@ -171,7 +171,7 @@ export interface User {
  * Checklist deliverable frequency, stored per template item in
  * `role_templates.items` JSON (no DB enum to change).
  *
- * - Weekly  : fixed routine, must be done every week. N/A is never allowed.
+ * - Weekly  : fixed routine, starts incomplete; staff may choose N/A if it does not apply.
  * - Monthly : periodic duty, N/A allowed EXCEPT in the month's final week when
  *             it was not completed in an earlier week of that same month.
  *             A monthly deliverable is scheduled by its owner in exactly one week
@@ -219,12 +219,34 @@ export interface ProofItem {
   s3Key?: string; // S3 object key for uploaded proof files
   size?: number; // bytes (for file)
   uploadedAt: string;
+  // Chosen but not yet sent: raw data URL held locally until the user submits
+  // (uploads happen on submit, not on file choose). Empty until then.
+  pendingDataUrl?: string;
 }
 
 export interface MultiProofData {
   files: ProofItem[];
   cloudLinks: ProofItem[];
   telegramLinks: ProofItem[];
+}
+
+export interface SubmittedFile {
+  id: string;
+  source: 'TR' | 'TRS';
+  sourceCode: string;
+  sourceId?: number | string;
+  sourceLabel: string;
+  weekNumber?: number | null;
+  year?: number | null;
+  ownerCode: string;
+  ownerName: string;
+  department: string;
+  name: string;
+  url: string;
+  s3Key: string | null;
+  size: number | null;
+  uploadedAt: string | null;
+  status: string;
 }
 
 export interface TRSTaskComment {
@@ -380,6 +402,64 @@ export interface SignatureData {
   signeeName: string;
 }
 
+// ---------------------------------------------------------------
+// Weekly Summary Form (IRG-HR-FRM-WSUM-001 v1.1) — Sections A-J.
+// Persisted in its own table (tr_weekly_summaries) keyed by report code,
+// never as extra columns on `reports`.
+// ---------------------------------------------------------------
+export type WeekStatus = 'On track' | 'Minor delays' | 'Significant delays' | 'Blocked';
+
+export interface SummaryMeeting {
+  title: string;      // max 100
+  date: string;       // must fall inside the report week
+  type: string;
+  attendees: string;  // max 300
+  decisions: string;  // max 400
+  minutesName?: string;
+  minutesUrl?: string;
+}
+
+export interface SummaryProblem {
+  title: string;      // max 100
+  category: string;
+  severity: 'Low' | 'Medium' | 'High' | '';
+  description: string; // max 500
+  relatedTask: string;
+  state: string;      // Resolved / Ongoing / Need help
+}
+
+export interface SummaryChallenge {
+  challenge: string; // max 400
+  impact: string;     // max 300
+}
+
+export interface SummaryNeed {
+  what: string; // max 300
+  from: string;
+  by: string;   // date, not earlier than week start
+}
+
+export interface SummaryIdea {
+  suggestion: string; // max 500
+  area: string;
+  benefit: string;    // max 300
+}
+
+export interface WeeklySummary {
+  weekStatus: WeekStatus | '';
+  overallComment: string; // max 300
+  hadMeetings: boolean | null;
+  meetings: SummaryMeeting[];      // max 10
+  noProblems: boolean;
+  problems: SummaryProblem[];      // max 5
+  challenges: SummaryChallenge[];  // max 3
+  needs: SummaryNeed[];            // max 3
+  ideas: SummaryIdea[];            // max 3
+  achievements: string;            // max 500
+  priorities: string[];            // 3 x max 150
+  confirmed: boolean;
+}
+
 export interface WeeklyReport {
   id: string;
   staffId: string;
@@ -401,6 +481,7 @@ export interface WeeklyReport {
   qualityScore?: number; // 0 - 30 pts (superior quality verification)
   signature?: SignatureData;
   notes?: string;
+  summary?: WeeklySummary; // Weekly Summary Form (Sections A-J), stored in tr_weekly_summaries
   delayReason?: string; // Explanation for late or retroactive submission (e.g. system adoption backfill)
   latePenaltyWaived?: boolean; // Superior granted waiver for late submission
   waivedBy?: string; // Superior ID who granted waiver
@@ -420,6 +501,34 @@ export interface WeeklyReport {
   approvedDeadline?: string; // Official extended submission deadline (superior approved grace period)
   extensionRequest?: TRSExtensionRequest; // Staff extension request before or during deadline
   extensionHistory?: TRSExtensionRequest[]; // Historical log of requested extensions
+}
+
+/** Snapshot stored with a saved team summary so history survives report edits/deletes. */
+export interface TeamSummaryReportSnapshot {
+  code: string;
+  staffCode: string;
+  staffName: string;
+  position: string;
+  department: string;
+  weekNumber: number;
+  year: number;
+  startDate: string;
+  endDate: string;
+  status: string;
+  trScore: number;
+}
+
+/** One saved AI consolidated summary (chat-style history entry). */
+export interface TeamSummaryRecord {
+  id?: number;
+  code: string;
+  title: string;
+  reportCodes: string[];
+  reportSnapshot: TeamSummaryReportSnapshot[];
+  reportCount: number;
+  summaryText: string;
+  model?: string | null;
+  createdAt: string;
 }
 
 export interface ActivityLog {
@@ -480,6 +589,8 @@ export interface TelegramConfig {
     notifyAppraisalApproved: boolean;
   };
   userTelegramHandles: Record<string, TelegramUserMapping>; // userId -> TelegramUserMapping
+  webhookSecret?: string; // Secret token for webhook verification
+  webhookUrl?: string; // Current webhook URL
   createdAt?: string;
   updatedAt?: string;
 }

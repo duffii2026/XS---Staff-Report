@@ -142,6 +142,37 @@ router.get('/:code', requireUser, asyncHandler(async (req, res) => {
   ok(res, publicUser(user));
 }));
 
+/** GET /api/users/:code/with-superior */
+router.get('/:code/with-superior', requireUser, asyncHandler(async (req, res) => {
+  const actor = req.user;
+  const target = req.params.code;
+  const { canAccessUser } = await import('../services/scoping.js');
+  if (!(await canAccessUser(actor, target))) throw new ApiError(403, 'You can only view your own or subordinate data.');
+
+  const user = await getOne(`
+    SELECT u.*,
+      (SELECT code FROM users s WHERE s.code = u.superior_id) AS superior_code,
+      (SELECT username FROM users s WHERE s.code = u.superior_id) AS superior_username,
+      (SELECT name FROM users s WHERE s.code = u.superior_id) AS superior_name,
+      (SELECT full_name FROM users s WHERE s.code = u.superior_id) AS superior_full_name,
+      (SELECT role FROM users s WHERE s.code = u.superior_id) AS superior_role
+    FROM users u WHERE u.code = ?`, [target]);
+
+  if (!user) throw new ApiError(404, 'User not found.');
+
+  ok(res, {
+    user: publicUser(user),
+    superior: user.superior_code ? {
+      id: user.superior_code,
+      code: user.superior_code,
+      username: user.superior_username,
+      name: user.superior_name || user.superior_full_name || user.superior_username,
+      fullName: user.superior_full_name || user.superior_name,
+      role: user.superior_role
+    } : null
+  });
+}));
+
 /** POST /api/users — create user */
 router.post('/', requireUser, requirePermission('manageUsers'), asyncHandler(async (req, res) => {
   const { username, name, email = '', role = 'staff', department = '', position = '', superior_id = null, password, avatar_url = null } = req.body || {};
