@@ -1,0 +1,3 @@
+# Per-instance env files (secrets) — selected at runtime via ENV_FILE, never tracked
+.env*
+**/.env*

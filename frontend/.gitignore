@@ -1,0 +1,14 @@
+node_modules/
+build/
+dist/
+dist2/
+dist3/
+dist*/
+coverage/
+.DS_Store
+*.log
+# Per-env secrets files hold the real GEMINI_API_KEY (never tracked).
+# The .env* files themselves ARE tracked, with GEMINI_API_KEY left blank.
+*.secrets
+.env.local
+!.env.example
