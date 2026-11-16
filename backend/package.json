@@ -1,0 +1,44 @@
+{
+  "name": "apa-staff-report-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "start:dist": "node dist/index.mjs",
+    "dev": "cross-env ENV_FILE=.env1 node --watch index.js",
+    "dev1": "cross-env ENV_FILE=.env1 node --watch index.js",
+    "dev2": "cross-env ENV_FILE=.env2 node --watch index.js",
+    "dev3": "cross-env ENV_FILE=.env3 node --watch index.js",
+    "start3": "cross-env ENV_FILE=.env3 node index.js",
+    "serve1": "pm2 start ecosystem.config.cjs --only stf_reportb1",
+    "serve2": "pm2 start ecosystem.config.cjs --only stf_reportb2",
+    "serve3": "pm2 start ecosystem.config.cjs --only stf_reportb3",
+    "build": "webpack --config webpack.config.mjs --mode production",
+    "seed": "node scripts/seed.js",
+    "migrate:passwords": "node scripts/encrypt-passwords.js",
+    "check": "node --check index.js && node --check services/auth.js && node --check services/passwordCrypto.js && node --check scripts/encrypt-passwords.js"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "webpack": "^5.111.1",
+    "webpack-cli": "^5.1.4",
+    "webpack-node-externals": "^3.0.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.658.0",
+    "@aws-sdk/s3-request-presigner": "^3.658.0",
+    "@google/genai": "^2.4.0",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.11.4",
+    "nanoid": "^5.0.7"
+  }
+}

@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+/* Slim native scrollbar for scrollable content panes (PC) */
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(148 163 184 / 0.55) transparent;
+}
+.thin-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background-color: rgb(148 163 184 / 0.55);
+  border-radius: 999px;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(100 116 139 / 0.8);
+}
+
+/* Remove tap highlight flash on touch devices */
+button,
+a,
+select,
+input,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Mobile: force all form controls to a compact 12px font size (placeholders inherit) */
+@media (max-width: 640px) {
+  input:not([type='checkbox']):not([type='radio']),
+  textarea,
+  select {
+    font-size: 12px !important;
+  }
+}
+
+@keyframes submitConflictShake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+
+@keyframes fetchbar {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(300%); }
+}
+
+@media print {
+  /* Hide non-printable navigation, buttons, header, and app frames */
+  nav,
+  header,
+  aside,
+  button,
+  .print\:hidden,
+  .no-print {
+    display: none !important;
+  }
+
+  html, body {
+    background-color: white !important;
+    background: white !important;
+    color: black !important;
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  /* Reset modal overlay backdrop during printing */
+  .printable-overlay {
+    position: static !important;
+    background: none !important;
+    background-color: transparent !important;
+    backdrop-filter: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    display: block !important;
+  }
+
+  /* Make printable document expand fully to 100% without scroll/clip */
+  .printable-document {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: none !important;
+    height: auto !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 20px !important;
+    background: white !important;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+  }
+
+  .printable-document * {
+    color: black !important;
+    box-shadow: none !important;
+  }
+}

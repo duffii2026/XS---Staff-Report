@@ -1,0 +1,8 @@
+{
+  "name": "APA - Staff Report",
+  "description": "Centralized weekly/monthly staff reporting system with JD checklist automation, superior TRS report delegation, team hierarchy visibility, digital signature, and performance evaluation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

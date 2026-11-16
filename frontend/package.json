@@ -1,0 +1,53 @@
+{
+  "name": "react-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "cross-env VITE_APP=1 ENV_FILE=.env1 tsx server.ts",
+    "dev1": "cross-env VITE_APP=1 ENV_FILE=.env1 tsx server.ts",
+    "dev2": "cross-env VITE_APP=2 ENV_FILE=.env2 tsx server2.ts",
+    "dev3": "cross-env VITE_APP=3 ENV_FILE=.env3 tsx server3.ts",
+    "build": "cross-env VITE_APP=1 vite build --mode build1 && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build1": "cross-env VITE_APP=1 vite build --mode build1 && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build2": "cross-env VITE_APP=2 vite build --mode build2 && esbuild server2.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist2/server.cjs",
+    "build3": "cross-env VITE_APP=3 vite build --mode build3 && esbuild server3.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist3/server.cjs",
+    "start": "node dist/server.cjs",
+    "start2": "node dist2/server.cjs",
+    "start3": "node dist3/server.cjs",
+    "serve1": "pm2 start ecosystem.config.cjs --only stf_report_1",
+    "serve2": "pm2 start ecosystem.config.cjs --only stf_report_2",
+    "serve3": "pm2 start ecosystem.config.cjs --only stf_report_3",
+    "deploy": "npm install && pm2 delete apa-staff-report-1 || true && NODE_ENV=production PORT=3554 pm2 start dist/server.cjs --name apa-staff-report-1",
+    "deploy2": "npm install && pm2 delete apa-staff-report-2 || true && NODE_ENV=production PORT=3555 pm2 start dist2/server.cjs --name apa-staff-report-2",
+    "deploy3": "npm install && pm2 delete apa-staff-report-3 || true && NODE_ENV=production PORT=3556 pm2 start dist3/server.cjs --name apa-staff-report-3",
+    "clean": "rm -rf dist dist2 dist3 server.js",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/genai": "^2.4.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@vitejs/plugin-react": "^5.0.4",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "recharts": "^3.10.1",
+    "vite": "^6.2.3"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "autoprefixer": "^10.4.21",
+    "cross-env": "^10.1.0",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.3"
+  }
+}
